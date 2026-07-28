@@ -21,7 +21,11 @@ steps:
     args:
       - -ceu
       - |
-        migration="$$(./scripts/get-latest-migration.sh)"
+        migration="$$(find packages/db/migrations -maxdepth 1 -type f -print \
+          | sed 's|.*/||; s/_.*//' \
+          | sort \
+          | tail -n 1)"
+        [[ "$${migration}" =~ ^[0-9]+$ ]]
         docker build \
           --tag "${_REGISTRY}/api:latest" \
           --tag "${_REGISTRY}/api:${_REVISION}" \

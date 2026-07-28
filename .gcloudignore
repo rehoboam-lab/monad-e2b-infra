@@ -1,6 +1,13 @@
 .gcloudignore
+#!include:.gitignore
 .git
 .github
+.env*
+.envrc
+.last_used_env
+*.tfvars
+*.tfstate
+*.tfstate.*
 .terraform
 **/.terraform
 **/.tfplan*
