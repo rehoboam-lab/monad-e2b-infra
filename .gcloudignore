@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.github
+.terraform
+**/.terraform
+**/.tfplan*
+**/bin
+**/node_modules
+docs
+iac
+tests
