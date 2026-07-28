@@ -1,5 +1,5 @@
 packer {
-  required_version = ">=1.8.4"
+  required_version = "=1.13.1"
   required_plugins {
     googlecompute = {
       version = "1.0.16"
@@ -14,16 +14,21 @@ locals {
 }
 
 source "googlecompute" "orch" {
-  image_family = "${var.prefix}orch"
-
-  # TODO: Overwrite the image instead of creating timestamped images every time we build its
-  image_name   = "${var.prefix}orch-${formatdate("YYYY-MM-DD-hh-mm-ss", timestamp())}"
-  project_id   = var.gcp_project_id
-  source_image = var.source_image
-  ssh_username = "ubuntu"
-  zone         = var.gcp_zone
-  disk_size    = local.quota_reserve.pd_ssd_gb
-  disk_type    = local.quota_reserve.disk_type
+  image_family      = var.image_family
+  image_name        = var.image_name
+  image_description = "Monad operator-canary Nomad image from ${var.source_revision}"
+  image_labels = {
+    monad_environment = var.image_environment
+    monad_revision    = var.source_revision
+  }
+  project_id                      = var.gcp_project_id
+  source_image                    = var.source_image
+  source_image_project_id         = ["ubuntu-os-cloud"]
+  ssh_username                    = "ubuntu"
+  zone                            = var.gcp_zone
+  disk_size                       = local.quota_reserve.pd_ssd_gb
+  disk_type                       = local.quota_reserve.disk_type
+  disable_default_service_account = true
 
   # This is used only for building the image and the GCE VM is then deleted
   machine_type = local.quota_reserve.machine_type
@@ -191,5 +196,18 @@ build {
       "sudo dpkg-divert --add --rename --divert /etc/systemd/resolved.conf.d/gce-resolved.conf.diverted /etc/systemd/resolved.conf.d/gce-resolved.conf || true",
       "echo 'dpkg-divert configured successfully'",
     ]
+  }
+
+  post-processor "manifest" {
+    output     = var.build_manifest_path
+    strip_path = true
+    custom_data = {
+      environment     = var.image_environment
+      image_family    = var.image_family
+      image_name      = var.image_name
+      source_image    = var.source_image
+      source_project  = "ubuntu-os-cloud"
+      source_revision = var.source_revision
+    }
   }
 }

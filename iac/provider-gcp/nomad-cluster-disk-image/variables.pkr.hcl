@@ -14,9 +14,24 @@ variable "subnet_name" {
   type = string
 }
 
-variable "prefix" {
-  type    = string
-  default = "e2b-"
+variable "image_name" {
+  type = string
+}
+
+variable "image_family" {
+  type = string
+}
+
+variable "image_environment" {
+  type = string
+}
+
+variable "source_revision" {
+  type = string
+}
+
+variable "build_manifest_path" {
+  type = string
 }
 
 variable "consul_version" {
