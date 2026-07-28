@@ -2,18 +2,8 @@ name: Monad Terraform Validation
 
 on:
   pull_request:
-    paths:
-      - "iac/provider-gcp/**"
-      - ".tool-versions"
-      - ".github/workflows/**"
-      - ".github/upstream-workflows-disabled/**"
   push:
     branches: [main]
-    paths:
-      - "iac/provider-gcp/**"
-      - ".tool-versions"
-      - ".github/workflows/**"
-      - ".github/upstream-workflows-disabled/**"
   workflow_dispatch:
 
 permissions:
