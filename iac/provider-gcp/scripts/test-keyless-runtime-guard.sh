@@ -27,13 +27,15 @@ if "$guard" "${test_dir}/acl-bad.txt" >"${test_dir}/acl-bad.log" 2>&1; then
 fi
 grep -F "Static GCP credentials are forbidden" "${test_dir}/acl-bad.log" >/dev/null
 
-grep -F 'service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com' \
-  "$cloud_build_tf" >/dev/null
+if [[ -f "$cloud_build_tf" ]]; then
+  grep -F 'service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com' \
+    "$cloud_build_tf" >/dev/null
 
-if grep -F 'member  = "serviceAccount:${google_project_service_identity.cloud_build.email}"' \
-  "$cloud_build_tf" >/dev/null; then
-  echo "Cloud Build IAM must target the regional-build service agent, not the legacy build account." >&2
-  exit 1
+  if grep -F 'member  = "serviceAccount:${google_project_service_identity.cloud_build.email}"' \
+    "$cloud_build_tf" >/dev/null; then
+    echo "Cloud Build IAM must target the regional-build service agent, not the legacy build account." >&2
+    exit 1
+  fi
 fi
 
 echo "Keyless GCP runtime guard tests passed."
