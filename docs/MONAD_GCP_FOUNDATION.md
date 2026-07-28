@@ -97,6 +97,24 @@ apply, re-check the selected region's instance, CPU, SSD, local SSD, address,
 and relevant per-machine-family quotas. Increase the policy only through a
 reviewed change supported by updated cost and capacity evidence.
 
+Read-only quota inspection on 2026-07-28 found the following current limits
+with zero usage in both candidate regions:
+
+- `australia-southeast1`: 24 instances, 100 vCPUs, 500 GB persistent SSD, and
+  eight in-use addresses;
+- `us-east4`: 24 instances, 200 vCPUs, 500 GB persistent SSD, and eight in-use
+  addresses.
+
+The instance guard does not imply that those other quotas are sufficient.
+Using the checked-in machine and disk defaults, the maximal steady topology is
+approximately 38 vCPUs and 1,160 GB of persistent SSD; a full simultaneous MIG
+rollout can reach approximately 96 vCPUs and 2,620 GB of persistent SSD. The
+maximal steady topology also uses eight public addresses before any substitute
+instances are created. These are configuration-derived estimates, not a
+replacement for reviewing the real saved plan. The workload apply remains
+blocked until SSD and address quota or network/disk choices are changed, and
+the saved plan proves adequate headroom for every quota dimension.
+
 The capacity limit does not make worker replacement safe. Snapshot or pause
 every active sandbox, wait for snapshot uploads to become durable, stop new
 placement on the affected Nomad nodes, drain allocations, and verify the MIG
