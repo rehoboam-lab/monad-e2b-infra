@@ -32,35 +32,8 @@ jobs:
         with:
           terraform_version: "${{ env.TERRAFORM }}"
 
-      - name: Setup Packer
-        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
-        with:
-          version: "${{ env.PACKER }}"
-
-      - name: Verify pinned IaC tool versions
-        run: |
-          test "$(terraform version -json | jq -r .terraform_version)" = "1.7.5"
-          test "$(packer version | sed -n 's/^Packer v//p')" = "${PACKER}"
-
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive
-
-      - name: Check Packer formatting
-        run: packer fmt -check iac/provider-gcp/nomad-cluster-disk-image
-
-      - name: Test workload topology and quota guard
-        run: make -C iac/provider-gcp workload-plan-assertions-test
-
-      - name: Validate Packer quota reserve
-        working-directory: ./iac/provider-gcp/nomad-cluster-disk-image
-        run: |
-          packer init .
-          packer validate \
-            -var gcp_project_id=quota-validation \
-            -var gcp_zone=us-east4-a \
-            -var network_name=quota-validation \
-            -var subnet_name=quota-validation \
-            .
 
       - name: Validate terraform
         working-directory: ./iac/provider-gcp

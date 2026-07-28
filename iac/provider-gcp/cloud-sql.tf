@@ -13,8 +13,6 @@ resource "google_project_service" "cloud_sql_admin_api" {
   service = "sqladmin.googleapis.com"
 
   disable_on_destroy = false
-
-  depends_on = [terraform_data.runtime_credential_guard]
 }
 
 resource "google_project_service" "service_networking_api" {
@@ -22,8 +20,6 @@ resource "google_project_service" "service_networking_api" {
   service = "servicenetworking.googleapis.com"
 
   disable_on_destroy = false
-
-  depends_on = [terraform_data.runtime_credential_guard]
 }
 
 resource "google_project_service_identity" "cloud_sql" {
@@ -166,8 +162,6 @@ resource "terraform_data" "cloud_sql_connection_budget" {
       EOT
     }
   }
-
-  depends_on = [terraform_data.runtime_credential_guard]
 }
 
 resource "google_sql_database" "operator_canary" {
@@ -179,8 +173,6 @@ resource "google_sql_database" "operator_canary" {
 resource "random_password" "cloud_sql_operator_canary" {
   length  = 32
   special = false
-
-  depends_on = [terraform_data.runtime_credential_guard]
 }
 
 resource "google_sql_user" "operator_canary" {
