@@ -4,10 +4,12 @@ ENV_FILE := ../../.env.${ENV}
 -include ${ENV_FILE}
 
 TF := $(shell which terraform)
-EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../.tool-versions)
+GCLOUD := $(shell which gcloud)
+override EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../.tool-versions)
 TF_VAR_FILE := ./.terraform.${ENV}.tfvars
 TF_VAR_FILE_ARG := $(if $(wildcard $(TF_VAR_FILE)),-var-file=$(TF_VAR_FILE))
 TERRAFORM_STATE_BUCKET ?= $(GCP_PROJECT_ID)-terraform-state
+override TERRAFORM_STATE_PREFIX := terraform/orchestration/$(ENV)/state
 TEMPLATE_BUCKET_LOCATION ?= $(GCP_REGION)
 BUCKET_PREFIX ?= $(GCP_PROJECT_ID)-
 
@@ -106,8 +108,19 @@ init:
 	@ exit 1
 
 FOUNDATION_PLAN := .tfplan.foundation.$(ENV)
+FOUNDATION_PLAN_MANIFEST := $(FOUNDATION_PLAN).manifest
 FOUNDATION_DESTROY_PLAN := .tfplan.foundation-destroy.$(ENV)
 override FOUNDATION_CONFIRMATION := APPLY KEYLESS FOUNDATION
+
+define foundation_metadata_context
+FOUNDATION_ENV="$(ENV)" \
+FOUNDATION_ENV_FILE="$(ENV_FILE)" \
+FOUNDATION_TF_VAR_FILE="$(TF_VAR_FILE)" \
+FOUNDATION_GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+FOUNDATION_GCP_REGION="$(GCP_REGION)" \
+FOUNDATION_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+FOUNDATION_STATE_PREFIX="$(TERRAFORM_STATE_PREFIX)"
+endef
 
 .PHONY: runtime-blocked
 runtime-blocked:
@@ -117,10 +130,12 @@ runtime-blocked:
 .PHONY: foundation-config-guard
 foundation-config-guard:
 	@ test "$(ENV)" != "not-set" || (printf "No environment selected. Run 'make set-env ENV=dev' from the repository root.\n"; exit 1)
+	@ printf '%s' "$(ENV)" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$$' || (printf "Invalid environment name: %s\n" "$(ENV)"; exit 1)
 	@ test -f "$(ENV_FILE)" || (printf "Missing environment file $(ENV_FILE).\n"; exit 1)
 	@ test -n "$(GCP_PROJECT_ID)" || (printf "GCP_PROJECT_ID is required.\n"; exit 1)
 	@ test -n "$(GCP_REGION)" || (printf "GCP_REGION is required.\n"; exit 1)
 	@ test -n "$(TERRAFORM_STATE_BUCKET)" && test "$(TERRAFORM_STATE_BUCKET)" != "-terraform-state" || (printf "A valid TERRAFORM_STATE_BUCKET is required.\n"; exit 1)
+	@ test -n "$(TERRAFORM_STATE_PREFIX)" || (printf "A valid TERRAFORM_STATE_PREFIX is required.\n"; exit 1)
 
 .PHONY: foundation-toolchain-guard
 foundation-toolchain-guard:
@@ -135,24 +150,52 @@ foundation-toolchain-guard:
 .PHONY: foundation-init
 foundation-init: foundation-config-guard foundation-toolchain-guard
 	@ printf "Initializing keyless foundation state for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
-	@ gcloud storage buckets create gs://$(TERRAFORM_STATE_BUCKET) --location $(GCP_REGION) --project $(GCP_PROJECT_ID) --default-storage-class STANDARD --uniform-bucket-level-access > /dev/null 2>&1 || true
-	@ gcloud storage buckets update gs://$(TERRAFORM_STATE_BUCKET) --versioning --soft-delete-duration=30d
-	@ $(TF) init -input=false -reconfigure -backend-config=bucket=$(TERRAFORM_STATE_BUCKET)
+	@ ./scripts/ensure-foundation-state-bucket.sh \
+		"$(TERRAFORM_STATE_BUCKET)" \
+		"$(GCP_PROJECT_ID)" \
+		"$(GCP_REGION)" \
+		"$(GCLOUD)"
+	@ $(TF) init -input=false -reconfigure \
+		-backend-config=bucket="$(TERRAFORM_STATE_BUCKET)" \
+		-backend-config=prefix="$(TERRAFORM_STATE_PREFIX)"
+	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 
 .PHONY: foundation-plan
-foundation-plan: foundation-config-guard foundation-toolchain-guard
+foundation-plan:
+	@ printf '%s' "$(ENV)" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$$' || (printf "Invalid environment name: %s\n" "$(ENV)"; exit 1)
+	@ rm -f -- "$(FOUNDATION_PLAN)" "$(FOUNDATION_PLAN_MANIFEST)"
+	@ $(MAKE) foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning keyless foundation only for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
+	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ $(call tf_fmt)
-	@ umask 077; $(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
-		-var=anywhere_cache_enabled=false \
-		-target=module.init \
-		-out=$(FOUNDATION_PLAN) \
-		-input=false \
-		-compact-warnings
-	@ chmod 0600 $(FOUNDATION_PLAN)
-	@ ./scripts/assert-foundation-plan.sh "$(FOUNDATION_PLAN)" "$(TF)" apply
+	@ set -eu; \
+		before_fingerprint="$$($(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh fingerprint "$(TF)" "." "../..")"; \
+		temp_dir="$$(mktemp -d ".foundation-plan.$(ENV).XXXXXX")"; \
+		temp_plan="$${temp_dir}/plan"; \
+		temp_manifest="$${temp_dir}/manifest"; \
+		trap 'rm -rf -- "$${temp_dir}"' EXIT HUP INT TERM; \
+		umask 077; \
+		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
+			-var=anywhere_cache_enabled=false \
+			-target=module.init \
+			-out="$${temp_plan}" \
+			-input=false \
+			-compact-warnings; \
+		chmod 0600 "$${temp_plan}"; \
+		after_fingerprint="$$($(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh fingerprint "$(TF)" "." "../..")"; \
+		if [ "$${before_fingerprint}" != "$${after_fingerprint}" ]; then \
+			printf "Refusing foundation plan: configuration changed while Terraform was planning.\n" >&2; \
+			exit 1; \
+		fi; \
+		./scripts/assert-foundation-plan.sh "$${temp_plan}" "$(TF)" apply; \
+		$(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh write \
+			"$${temp_plan}" "$${temp_manifest}" "$(TF)" "." "../.." "$${after_fingerprint}"; \
+		mv -f -- "$${temp_plan}" "$(FOUNDATION_PLAN)"; \
+		mv -f -- "$${temp_manifest}" "$(FOUNDATION_PLAN_MANIFEST)"; \
+		rmdir "$${temp_dir}"; \
+		trap - EXIT HUP INT TERM
 
 .PHONY: foundation-apply
 foundation-apply: foundation-config-guard foundation-toolchain-guard
@@ -161,24 +204,40 @@ foundation-apply: foundation-config-guard foundation-toolchain-guard
 		exit 1; \
 	fi
 	@ test -f $(FOUNDATION_PLAN) || (printf "Missing reviewed plan $(FOUNDATION_PLAN). Run 'make foundation-plan' first.\n"; exit 1)
+	@ test -f $(FOUNDATION_PLAN_MANIFEST) || (printf "Missing plan provenance $(FOUNDATION_PLAN_MANIFEST). Run 'make foundation-plan' first.\n"; exit 1)
+	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
+	@ $(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh verify \
+		"$(FOUNDATION_PLAN)" "$(FOUNDATION_PLAN_MANIFEST)" "$(TF)" "." "../.."
 	@ ./scripts/assert-foundation-plan.sh "$(FOUNDATION_PLAN)" "$(TF)" apply
 	@ $(TF) apply -input=false $(FOUNDATION_PLAN)
-	@ rm $(FOUNDATION_PLAN)
+	@ rm "$(FOUNDATION_PLAN)" "$(FOUNDATION_PLAN_MANIFEST)"
 
 .PHONY: foundation-destroy-plan
-foundation-destroy-plan: foundation-config-guard foundation-toolchain-guard
+foundation-destroy-plan:
+	@ printf '%s' "$(ENV)" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$$' || (printf "Invalid environment name: %s\n" "$(ENV)"; exit 1)
+	@ rm -f -- "$(FOUNDATION_DESTROY_PLAN)"
+	@ $(MAKE) foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning review-only foundation destroy for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
+	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
-	@ umask 077; $(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
-		-var=anywhere_cache_enabled=false \
-		-target=module.init \
-		-destroy \
-		-out=$(FOUNDATION_DESTROY_PLAN) \
-		-input=false \
-		-compact-warnings
-	@ chmod 0600 $(FOUNDATION_DESTROY_PLAN)
-	@ ./scripts/assert-foundation-plan.sh "$(FOUNDATION_DESTROY_PLAN)" "$(TF)" destroy
+	@ set -eu; \
+		temp_dir="$$(mktemp -d ".foundation-destroy-plan.$(ENV).XXXXXX")"; \
+		temp_plan="$${temp_dir}/plan"; \
+		trap 'rm -rf -- "$${temp_dir}"' EXIT HUP INT TERM; \
+		umask 077; \
+		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
+			-var=anywhere_cache_enabled=false \
+			-target=module.init \
+			-destroy \
+			-out="$${temp_plan}" \
+			-input=false \
+			-compact-warnings; \
+		chmod 0600 "$${temp_plan}"; \
+		./scripts/assert-foundation-plan.sh "$${temp_plan}" "$(TF)" destroy; \
+		mv -f -- "$${temp_plan}" "$(FOUNDATION_DESTROY_PLAN)"; \
+		rmdir "$${temp_dir}"; \
+		trap - EXIT HUP INT TERM
 	@ printf "Destroy plan is review-only; this branch intentionally provides no apply target.\n"
 
 .PHONY: state-migrate
@@ -198,7 +257,7 @@ apply-init: runtime-blocked
 	@ $(tf_vars) $(TF) apply $(TF_VAR_FILE_ARG) -target=module.init -auto-approve -input=false -compact-warnings
 
 .PHONY: switch
-switch:
+switch: runtime-blocked
 	@ printf "Switching Terraform backend for different env ${ENV}\n"
 	@ $(TF) init -input=false -upgrade -reconfigure -backend-config=bucket=$(TERRAFORM_STATE_BUCKET)
 

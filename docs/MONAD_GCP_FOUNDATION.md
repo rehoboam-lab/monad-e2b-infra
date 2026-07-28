@@ -56,6 +56,16 @@ rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
 `foundation-plan` targets only `module.init`. `foundation-apply` consumes the
 exact saved plan and requires a literal confirmation. It never invokes Packer
 and forces Anywhere Cache off even if an environment file says otherwise.
+Each environment uses an explicit backend prefix at
+`terraform/orchestration/<environment>/state`. Plan and apply fail unless the
+initialized backend metadata matches both the selected state bucket and that
+environment-specific prefix.
+
+`foundation-init` is the only pre-plan cloud mutation: it bootstraps the remote
+state bucket when absent, then enforces and re-reads its immutable project and
+location plus uniform bucket-level access, public access prevention, Standard
+storage, versioning, and 30-day soft deletion. It fails rather than reusing a
+bucket in another project or location, and it never suppresses a create error.
 
 The legacy `make init` path is disabled in the Monad fork. Workload modules
 depend on a hard-fail credential guard which has no variable escape hatch. The
@@ -84,11 +94,17 @@ foundation plan and their values must not appear in Terraform state.
 
 Saved Terraform plans contain cleartext configuration and input values,
 including sensitive values. `foundation-plan` creates its plan with mode 0600.
+It first invalidates any previous plan, publishes the replacement atomically,
+and writes a 0600 provenance manifest binding the plan digest to the Git commit,
+Terraform source and lock file, environment inputs, project, region, backend,
+and exact Terraform version. Apply recomputes that manifest and refuses any
+source, input, backend, toolchain, or plan-byte drift.
 Keep it on the trusted operator machine, do not upload it or persist
 `terraform show -json` output, and remove an abandoned plan with:
 
 ```bash
 rm -f iac/provider-gcp/.tfplan.foundation.dev
+rm -f iac/provider-gcp/.tfplan.foundation.dev.manifest
 rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
 ```
 
