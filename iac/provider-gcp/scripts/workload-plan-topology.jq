@@ -186,6 +186,7 @@ def usage_zero:
   {
     instances: 0,
     global_vcpus: 0,
+    e2_vcpus: 0,
     pd_ssd_gb: 0,
     pd_standard_gb: 0,
     local_ssd_gb: 0,
@@ -236,6 +237,17 @@ def scaled_role_usage($templates; $role; $count):
         number_or_zero($template.vcpus)
         * number_or_zero($count)
       ),
+      e2_vcpus: (
+        if (
+          ($template.machine_type | type) == "string"
+          and ($template.machine_type | startswith("e2-"))
+        ) then
+          number_or_zero($template.vcpus)
+          * number_or_zero($count)
+        else
+          0
+        end
+      ),
       pd_ssd_gb: (
         number_or_zero($template.pd_ssd_gb)
         * number_or_zero($count)
@@ -261,6 +273,16 @@ def reserve_usage($reserve):
   {
     instances: $reserve.instances,
     global_vcpus: $reserve.vcpus,
+    e2_vcpus: (
+      if (
+        ($reserve.machine_type | type) == "string"
+        and ($reserve.machine_type | startswith("e2-"))
+      ) then
+        $reserve.vcpus
+      else
+        0
+      end
+    ),
     pd_ssd_gb: $reserve.pd_ssd_gb,
     pd_standard_gb: $reserve.pd_standard_gb,
     local_ssd_gb: $reserve.local_ssd_gb,

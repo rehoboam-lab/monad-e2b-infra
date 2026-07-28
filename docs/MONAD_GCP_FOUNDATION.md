@@ -44,8 +44,9 @@ sandbox nodes, workload VMs, or Packer image.
    creates a dedicated private Cloud SQL database and publishes its generated
    connection URI into the existing Postgres secret container.
 5. Request the documented regional SSD quota before the workload phase.
-   The current `us-east4` instance quota is 24; model the reviewed smallest
-   fleet and request headroom before any workload plan exceeds it.
+   The release gate reads current usage and quota immediately before both plan
+   publication and apply. It admits only the reviewed one-workcell peak; fleet
+   expansion remains a later, separately reviewed change.
 
 ## Reviewable workflow
 
@@ -111,22 +112,60 @@ The supported foundation workflow still refuses existing state outside
 any destructive plan. A later patch should split foundation and workload into
 separate Terraform roots/states, removing the need for `-target`.
 
-The legacy `make plan`, `make apply`, and `make destroy` workload targets are
-disabled. The topology policy and its tests do not by themselves authorize a
-deployment. Workload mutation remains unavailable until a saved-plan workflow
-binds the reviewed source, environment, backend, quota policy, and plan bytes,
-reruns the topology check, and requires an exact apply confirmation.
+The legacy `make plan`, `make apply`, and `make destroy` workload targets remain
+disabled. Workload creation uses only the dedicated saved-plan workflow below.
+There is deliberately no workload destroy target.
 
-## Workload topology safety (not yet enabled)
+## One-workcell workload release
 
-The first full workload plan remains blocked until the keyless runtime
-credential migration is complete. When that gate is removed, save the plan and
-inspect its complete topology before apply:
+Set `CORE_IMAGE_REVISION` in the ignored selected environment file to the exact
+12–40 character source SHA used by Cloud Build for all five core images. It is
+an explicit release input rather than the infrastructure checkout HEAD because
+guard-only infrastructure commits do not rebuild application images. Then
+create and inspect the complete saved plan:
 
 ```bash
-make -C iac/provider-gcp workload-plan-check \
-  WORKLOAD_PLAN=.tfplan.dev
+mise exec -- make -C iac/provider-gcp workload-plan
+mise exec -- terraform -chdir=iac/provider-gcp \
+  show .tfplan.workload.dev
+mise exec -- make -C iac/provider-gcp workload-apply \
+  CONFIRM='APPLY ONE WORKCELL CANARY'
 ```
+
+`workload-plan` first deletes any old workload plan and manifest. It requires
+the exact selected environment, a regular explicit
+`.terraform.<environment>.tfvars`, the environment-specific GCS backend,
+Terraform's default workspace, the pinned Terraform version, the repository
+keyless-runtime checks, and absence of legacy ACL token generators. It creates
+a full plan without `-target` or `-destroy` in a mode-0700 temporary directory.
+The plan and provenance manifest remain mode 0600 and are published by atomic
+renames only after the topology and live-quota checks pass.
+
+The manifest binds the saved plan digest to Git HEAD, all Terraform source and
+the dependency lock, selected environment and var-file bytes, project, region,
+backend, default workspace, Terraform version, topology policy, and all Packer
+HCL/setup inputs. Artifact preflight resolves the concrete active `e2b-orch`
+image plus both the pinned-revision and `latest` digest for `api`,
+`db-migrator`, `client-proxy`, `docker-reverse-proxy`, and
+`clickhouse-migrator`. `latest` must match the pinned revision. The canonical
+resolved identities and their digest are embedded in provenance so a moved tag
+or image family invalidates apply.
+
+`workload-apply` requires the literal confirmation above. It rechecks context,
+provenance, exact plan topology, live quota/current usage, and resolved
+artifacts. Before the final checks it acquires the shared project/region rollout
+lease in the versioned state bucket, using a holder derived from both the plan
+and manifest digests. Packer and workload mutation therefore cannot overlap.
+Lease creation requires object generation zero; release deletes only the exact
+generation acquired, and stale leases are never stolen automatically.
+
+While holding that lease, apply consumes only the saved plan bytes and runs one
+read-only post-apply convergence plan. The saved plan and manifest are deleted
+only after Terraform apply and convergence both succeed. Any refusal, apply
+failure, or residual drift preserves them for diagnosis and attempts a
+generation-matched lease release. Use the lease helper's `inspect` mode for a
+manual stale-lease review; never delete an unexplained lease merely because it
+is old.
 
 The checked-in operator-canary policy expects three Nomad/Consul servers, one
 API node, one build node, one sandbox client node, and no ClickHouse or Loki
@@ -159,23 +198,29 @@ The base fleet is six VMs and 26 vCPUs. Two transient scenarios are reviewed:
 Those scenarios are mutually exclusive. Never run Packer while any MIG rollout
 is active. Adding both at once would require eight VMs and 34 vCPUs, exceeding
 the reviewed 32-vCPU limit. The guard takes the maximum usage across the two
-serialized scenarios, yielding seven VMs, 30 vCPUs, 470 GB SSD PD, 400 GB
-standard PD, 750 GB local SSD, and seven regional public IPs.
+serialized scenarios, yielding seven VMs, 30 total vCPUs, 14 E2-family vCPUs,
+470 GB SSD PD, 400 GB standard PD, 750 GB local SSD, and seven regional public
+IPs.
 
-The reviewed hard limits are 24 instances, 32 global vCPUs, 500 GB SSD PD,
-4,096 GB standard PD, 6,000 GB N1 local SSD, and eight regional public IPs.
+The reviewed admission floors are 24 instances, 32 global vCPUs, 24 E2-family
+vCPUs, 500 GB SSD PD, 4,096 GB standard PD, 6,000 GB N1 local SSD, and eight
+regional public IPs.
 The policy and the Packer source are both checked in CI, including the static
 Packer machine/disk/IP reserve. Any policy limit change or plan usage drift
-fails closed. These values remain a reviewed snapshot rather than live quota
-evidence: immediately before apply, re-check every limit and current usage in
-the selected project and region. Do not raise the checked-in limits without
-updated quota evidence and review.
+fails closed. At plan and apply the gate independently reads
+`CPUS_ALL_REGIONS`, regional instances, `E2_CPUS`, SSD PD, standard PD, local
+SSD, and in-use regional public IPs. N1 usage consumes the generic CPU quota in
+this project and no nonexistent `N1_CPUS` metric is required. The live limit
+must remain at least the reviewed floor and live headroom must cover the full
+policy peak. An unlimited quota is handled explicitly rather than treated as
+missing. Tests use a fake gcloud fixture and cannot contact GCP.
 
-The capacity limit does not make worker replacement safe. Snapshot or pause
+The capacity limit does not make a later worker replacement safe. Snapshot or pause
 every active sandbox, wait for snapshot uploads to become durable, stop new
 placement on the affected Nomad nodes, drain allocations, and verify the MIG
 is stable before replacing a worker template. That orchestration is not yet
-implemented, so any workload rollout remains an operator-blocked procedure.
+implemented, so this gate authorizes only the initial one-workcell canary and
+non-destructive plans. It does not authorize fleet replacement or expansion.
 
 After the foundation apply, add the Cloudflare secret version directly over
 stdin so its value never enters shell history. Replace `<prefix>` with the
@@ -243,7 +288,7 @@ order](https://cloud.google.com/vpc/docs/configure-private-services-access#delet
 do not release an in-use allocation or delete the VPC Network Peering directly.
 
 Saved Terraform plans contain cleartext configuration and input values,
-including sensitive values. `foundation-plan` creates its plan with mode 0600.
+including sensitive values. Both supported plan workflows use mode 0600.
 It first invalidates any previous plan, publishes the replacement atomically,
 and writes a 0600 provenance manifest binding the plan digest to the Git commit,
 Terraform source and lock file, environment inputs, project, region, backend,
@@ -261,6 +306,8 @@ Keep it on the trusted operator machine, do not upload it or persist
 rm -f iac/provider-gcp/.tfplan.foundation.dev
 rm -f iac/provider-gcp/.tfplan.foundation.dev.manifest
 rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
+rm -f iac/provider-gcp/.tfplan.workload.dev
+rm -f iac/provider-gcp/.tfplan.workload.dev.manifest
 ```
 
 ## Exit evidence
@@ -274,11 +321,12 @@ rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
 - The plan contains only reviewed foundation resources.
 - A destroy plan has been inspected.
 
-The runtime migration is code-complete but is not live evidence. The next
-milestone is a reviewed smallest-fleet workload plan, image build, and stock SDK
-create/pause/resume/fork canary. That canary must prove metadata-server ADC,
-signed uploads, registry push/pull, snapshot persistence, ClickHouse backup,
-and credential refresh before production promotion.
+The runtime migration and workload release gate are code-complete but are not
+live evidence. The next milestone is to execute the gate, inspect its
+smallest-fleet plan, and run the stock SDK create/pause/resume/fork canary.
+That canary must prove metadata-server ADC, signed uploads, registry push/pull,
+snapshot persistence, ClickHouse backup, and credential refresh before
+production promotion.
 
 ## Build the control-plane images
 

@@ -78,6 +78,7 @@ expect_success() {
     "${packer_template}" >"${output_path}"
 
   grep -F '"global_vcpus":30' "${output_path}" >/dev/null
+  grep -F '"e2_vcpus":14' "${output_path}" >/dev/null
   grep -F '"instances":7' "${output_path}" >/dev/null
   grep -F '"pd_ssd_gb":470' "${output_path}" >/dev/null
   grep -F '"pd_standard_gb":400' "${output_path}" >/dev/null

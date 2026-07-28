@@ -33,6 +33,7 @@ reviewed_quota_limits="$(
   jq -cn '{
     instances: 24,
     global_vcpus: 32,
+    e2_vcpus: 24,
     pd_ssd_gb: 500,
     pd_standard_gb: 4096,
     local_ssd_gb: 6000,
@@ -43,6 +44,7 @@ reviewed_peak_usage="$(
   jq -cn '{
     instances: 7,
     global_vcpus: 30,
+    e2_vcpus: 14,
     pd_ssd_gb: 470,
     pd_standard_gb: 400,
     local_ssd_gb: 750,
@@ -124,6 +126,7 @@ jq -e \
   def quota_usage_shape:
     (keys | sort)
       == [
+        "e2_vcpus",
         "global_vcpus",
         "instances",
         "local_ssd_gb",
