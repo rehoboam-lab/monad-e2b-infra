@@ -36,6 +36,8 @@ sandbox nodes, workload VMs, or Packer image.
    Secret Manager containers; versions are added out-of-band only after the
    reviewed foundation apply.
 4. Request the documented regional SSD quota before the workload phase.
+   The current `us-east4` instance quota is 24; model the reviewed smallest
+   fleet and request headroom before any workload plan exceeds it.
 
 ## Reviewable workflow
 
