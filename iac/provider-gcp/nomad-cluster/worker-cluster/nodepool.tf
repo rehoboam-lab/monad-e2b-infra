@@ -127,12 +127,12 @@ resource "google_compute_region_instance_group_manager" "pool" {
   update_policy {
     type           = var.environment == "dev" ? "PROACTIVE" : "OPPORTUNISTIC"
     minimal_action = "REPLACE"
-    # Regional MIGs use three zones by default. GCP requires a fixed surge to
-    # be either zero or at least the number of zones, so three is the minimum
-    # valid bounded surge for this topology.
-    max_surge_fixed              = 3
+    # The quota-constrained dev canary is explicitly downtime-tolerant: drain
+    # its single worker, then replace it without a surge VM. Non-dev regional
+    # MIGs keep the minimum valid one-per-zone surge.
+    max_surge_fixed              = var.environment == "dev" ? 0 : 3
     max_surge_percent            = null
-    max_unavailable_fixed        = 5
+    max_unavailable_fixed        = var.environment == "dev" ? 1 : 5
     max_unavailable_percent      = null
     replacement_method           = "SUBSTITUTE"
     instance_redistribution_type = "NONE"

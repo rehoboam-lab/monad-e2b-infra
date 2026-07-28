@@ -2,12 +2,103 @@
   "expected_role_max_instances": {
     "api": 1,
     "build": 1,
-    "clickhouse": 1,
-    "client": 2,
+    "clickhouse": 0,
+    "client": 1,
     "loki": 0,
     "server": 3
   },
-  "max_worker_surge_per_pool": 3,
-  "planning_instance_quota": 24,
-  "required_instance_headroom": 6
+  "expected_role_surge_instances": {
+    "api": 1,
+    "build": 0,
+    "clickhouse": 0,
+    "client": 0,
+    "loki": 0,
+    "server": 0
+  },
+  "expected_role_max_unavailable_instances": {
+    "api": 1,
+    "build": 1,
+    "clickhouse": 0,
+    "client": 1,
+    "loki": 0,
+    "server": 1
+  },
+  "expected_role_resources": {
+    "api": {
+      "machine_type": "e2-standard-4",
+      "vcpus": 4,
+      "pd_ssd_gb": 0,
+      "pd_standard_gb": 200,
+      "local_ssd_gb": 0,
+      "regional_public_ip": true
+    },
+    "build": {
+      "machine_type": "n1-standard-8",
+      "vcpus": 8,
+      "pd_ssd_gb": 200,
+      "pd_standard_gb": 0,
+      "local_ssd_gb": 375,
+      "regional_public_ip": true
+    },
+    "clickhouse": {
+      "machine_type": "e2-standard-4",
+      "vcpus": 4,
+      "pd_ssd_gb": 0,
+      "pd_standard_gb": 200,
+      "local_ssd_gb": 0,
+      "regional_public_ip": true
+    },
+    "client": {
+      "machine_type": "n1-standard-8",
+      "vcpus": 8,
+      "pd_ssd_gb": 200,
+      "pd_standard_gb": 0,
+      "local_ssd_gb": 375,
+      "regional_public_ip": true
+    },
+    "loki": {
+      "machine_type": "e2-standard-4",
+      "vcpus": 4,
+      "pd_ssd_gb": 0,
+      "pd_standard_gb": 200,
+      "local_ssd_gb": 0,
+      "regional_public_ip": true
+    },
+    "server": {
+      "machine_type": "e2-standard-2",
+      "vcpus": 2,
+      "pd_ssd_gb": 20,
+      "pd_standard_gb": 0,
+      "local_ssd_gb": 0,
+      "regional_public_ip": true
+    }
+  },
+  "transient_reserve": {
+    "machine_type": "n1-standard-4",
+    "instances": 1,
+    "vcpus": 4,
+    "disk_type": "pd-ssd",
+    "pd_ssd_gb": 10,
+    "pd_standard_gb": 0,
+    "local_ssd_gb": 0,
+    "regional_public_ips": 1
+  },
+  "transient_scenarios_are_mutually_exclusive": true,
+  "expected_peak_usage": {
+    "instances": 7,
+    "global_vcpus": 30,
+    "pd_ssd_gb": 470,
+    "pd_standard_gb": 400,
+    "local_ssd_gb": 750,
+    "regional_public_ips": 7
+  },
+  "quota_limits": {
+    "instances": 24,
+    "global_vcpus": 32,
+    "pd_ssd_gb": 500,
+    "pd_standard_gb": 4096,
+    "local_ssd_gb": 6000,
+    "regional_public_ips": 8
+  },
+  "max_automated_worker_server_surge_per_pool": 0
 }
