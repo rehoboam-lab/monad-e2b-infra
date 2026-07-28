@@ -132,7 +132,8 @@ mise exec -- make -C iac/provider-gcp workload-apply \
   CONFIRM='APPLY ONE WORKCELL CANARY'
 ```
 
-`workload-plan` first deletes any old workload plan and manifest. It requires
+`workload-plan` acquires the shared rollout lease before invalidating any old
+workload plan and manifest. It requires
 the exact selected environment, a regular explicit
 `.terraform.<environment>.tfvars`, the environment-specific GCS backend,
 Terraform's default workspace, the pinned Terraform version, the repository
@@ -154,18 +155,31 @@ or image family invalidates apply.
 `workload-apply` requires the literal confirmation above. It rechecks context,
 provenance, exact plan topology, live quota/current usage, and resolved
 artifacts. Before the final checks it acquires the shared project/region rollout
-lease in the versioned state bucket, using a holder derived from both the plan
-and manifest digests. Packer and workload mutation therefore cannot overlap.
+lease in the versioned state bucket, using an operation-scoped holder bound to
+the checkout, environment, process, and time. Packer, plan publication, and
+workload apply therefore cannot overlap.
 Lease creation requires object generation zero; release deletes only the exact
 generation acquired, and stale leases are never stolen automatically.
+The first canary requires the canonical
+`<project>-terraform-state` bucket so another checkout cannot create an
+independent lock in an alternate bucket. The lease is region-scoped; a future
+multi-region fleet needs a project-global capacity coordinator before rollout.
 
-While holding that lease, apply consumes only the saved plan bytes and runs one
-read-only post-apply convergence plan. The saved plan and manifest are deleted
-only after Terraform apply and convergence both succeed. Any refusal, apply
-failure, or residual drift preserves them for diagnosis and attempts a
-generation-matched lease release. Use the lease helper's `inspect` mode for a
-manual stale-lease review; never delete an unexplained lease merely because it
-is old.
+While holding that lease, apply consumes only a private verified copy of the
+saved plan and runs one read-only post-apply convergence plan. The published
+plan pair is moved into the private apply directory before lease release,
+restored if release fails, and consumed only after a successful release. Any
+refusal, apply failure, residual drift, or release failure therefore preserves
+review evidence. Use the lease helper's `inspect` mode for a manual stale-lease
+review; never delete an unexplained lease merely because it is old.
+
+For this first internal canary, an operator must inspect the complete saved plan
+before entering the literal apply confirmation. The automated guard rejects all
+deletes/state-forget actions and pins topology, quota, Cloud SQL, and runtime
+artifacts, but it does not yet maintain an exhaustive address/type allowlist for
+every non-destructive create or update. Unattended promotion remains disabled
+until that allowlist is generated from and reviewed against the first real
+plan.
 
 The checked-in operator-canary policy expects three Nomad/Consul servers, one
 API node, one build node, one sandbox client node, and no ClickHouse or Loki
@@ -198,19 +212,19 @@ The base fleet is six VMs and 26 vCPUs. Two transient scenarios are reviewed:
 Those scenarios are mutually exclusive. Never run Packer while any MIG rollout
 is active. Adding both at once would require eight VMs and 34 vCPUs, exceeding
 the reviewed 32-vCPU limit. The guard takes the maximum usage across the two
-serialized scenarios, yielding seven VMs, 30 total vCPUs, 14 E2-family vCPUs,
+serialized scenarios, yielding seven VMs, 30 total regional/shared-pool vCPUs,
 470 GB SSD PD, 400 GB standard PD, 750 GB local SSD, and seven regional public
 IPs.
 
-The reviewed admission floors are 24 instances, 32 global vCPUs, 24 E2-family
-vCPUs, 500 GB SSD PD, 4,096 GB standard PD, 6,000 GB N1 local SSD, and eight
-regional public IPs.
+The reviewed admission floors are 24 instances, 32 global vCPUs, 32 regional
+shared-pool vCPUs, 500 GB SSD PD, 4,096 GB standard PD, 6,000 GB N1 local SSD,
+and eight regional public IPs.
 The policy and the Packer source are both checked in CI, including the static
 Packer machine/disk/IP reserve. Any policy limit change or plan usage drift
 fails closed. At plan and apply the gate independently reads
-`CPUS_ALL_REGIONS`, regional instances, `E2_CPUS`, SSD PD, standard PD, local
-SSD, and in-use regional public IPs. N1 usage consumes the generic CPU quota in
-this project and no nonexistent `N1_CPUS` metric is required. The live limit
+`CPUS_ALL_REGIONS`, regional instances, regional `CPUS`, SSD PD, standard PD,
+local SSD, and in-use regional public IPs. E2 and N1 both consume the regional
+`CPUS` shared pool. The live limit
 must remain at least the reviewed floor and live headroom must cover the full
 policy peak. An unlimited quota is handled explicitly rather than treated as
 missing. Tests use a fake gcloud fixture and cannot contact GCP.

@@ -147,7 +147,17 @@ endef
 
 .PHONY: workload-plan-check workload-plan-assertions-test workload-release-test packer-reserve-check
 workload-plan-check:
-	@ ./scripts/assert-workload-plan.sh "$(WORKLOAD_PLAN)" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"
+	@ test -f "$(WORKLOAD_PLAN_MANIFEST)" || (printf "Missing workload plan provenance %s.\n" "$(WORKLOAD_PLAN_MANIFEST)"; exit 1)
+	@ set -eu; \
+		umask 077; \
+		artifacts="$$(mktemp ".workload-plan-check.$(ENV).XXXXXX")"; \
+		trap 'rm -f -- "$${artifacts}"' EXIT HUP INT TERM; \
+		jq -eS '.release_artifacts' "$(WORKLOAD_PLAN_MANIFEST)" >"$${artifacts}"; \
+		chmod 0600 "$${artifacts}"; \
+		./scripts/assert-workload-plan.sh \
+			"$(WORKLOAD_PLAN)" "$(TF)" \
+			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
+			"$${artifacts}"
 
 workload-plan-assertions-test:
 	@ ./scripts/test-workload-plan-assertions.sh
@@ -196,6 +206,7 @@ acl-token-state-guard:
 
 .PHONY: workload-config-guard workload-context-guard
 workload-config-guard: foundation-config-guard
+	@ test "$(TERRAFORM_STATE_BUCKET)" = "$(GCP_PROJECT_ID)-terraform-state" || (printf "Workload rollout lease requires the canonical project state bucket %s-terraform-state; found %s.\n" "$(GCP_PROJECT_ID)" "$(TERRAFORM_STATE_BUCKET)"; exit 1)
 	@ test -f "$(TF_VAR_FILE)" && test ! -L "$(TF_VAR_FILE)" || (printf "Explicit workload var file must be a regular, non-symlink file: %s\n" "$(TF_VAR_FILE)"; exit 1)
 	@ test ! -L "$(ENV_FILE)" || (printf "Workload environment file must not be a symlink: %s\n" "$(ENV_FILE)"; exit 1)
 	@ test -n "$(GCP_ZONE)" || (printf "GCP_ZONE is required for the workload.\n"; exit 1)
@@ -284,7 +295,8 @@ workload-plan:
 		fi; \
 		./scripts/assert-workload-plan.sh \
 			"$${temp_plan}" "$(TF)" \
-			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"; \
+			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
+			"$${after_artifacts}"; \
 		./scripts/assert-workload-quota.sh \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCLOUD)"; \
@@ -306,30 +318,74 @@ workload-apply:
 		exit 1; \
 	fi
 	@ $(MAKE) workload-context-guard
-	@ test -f "$(WORKLOAD_PLAN)" || (printf "Missing reviewed workload plan %s. Run 'make workload-plan' first.\n" "$(WORKLOAD_PLAN)"; exit 1)
-	@ test -f "$(WORKLOAD_PLAN_MANIFEST)" || (printf "Missing workload plan provenance %s. Run 'make workload-plan' first.\n" "$(WORKLOAD_PLAN_MANIFEST)"; exit 1)
 	@ set -eu; \
 		temp_dir="$$(mktemp -d ".workload-apply.$(ENV).XXXXXX")"; \
 		before_artifacts="$${temp_dir}/artifacts-before.json"; \
 		after_artifacts="$${temp_dir}/artifacts-after.json"; \
 		apply_plan="$${temp_dir}/reviewed.plan"; \
 		apply_manifest="$${temp_dir}/reviewed.plan.manifest"; \
+		consumed_plan="$${temp_dir}/consumed.plan"; \
+		consumed_manifest="$${temp_dir}/consumed.plan.manifest"; \
 		lease_token="$${temp_dir}/lease-token.json"; \
 		lease_acquired=false; \
+		plan_moved=false; \
+		manifest_moved=false; \
 		cleanup() { \
 			status=$$?; \
+			restore_failed=false; \
 			trap - EXIT HUP INT TERM; \
+			if [ "$${plan_moved}" = true ]; then \
+				if [ ! -e "$(WORKLOAD_PLAN)" ] \
+					&& mv "$${consumed_plan}" "$(WORKLOAD_PLAN)"; then \
+					plan_moved=false; \
+				else \
+					printf "Could not restore consumed workload plan; preserving private recovery directory %s.\n" "$${temp_dir}" >&2; \
+					restore_failed=true; \
+					status=1; \
+				fi; \
+			fi; \
+			if [ "$${manifest_moved}" = true ]; then \
+				if [ ! -e "$(WORKLOAD_PLAN_MANIFEST)" ] \
+					&& mv "$${consumed_manifest}" "$(WORKLOAD_PLAN_MANIFEST)"; then \
+					manifest_moved=false; \
+				else \
+					printf "Could not restore consumed workload manifest; preserving private recovery directory %s.\n" "$${temp_dir}" >&2; \
+					restore_failed=true; \
+					status=1; \
+				fi; \
+			fi; \
 			if [ "$${lease_acquired}" = true ]; then \
 				if ! "$(WORKLOAD_ROLLOUT_LEASE)" release "$(GCLOUD)" "$${lease_token}"; then \
 					printf "Shared rollout lease release failed; inspect it before another rollout.\n" >&2; \
 					if [ "$${status}" -eq 0 ]; then status=1; fi; \
 				fi; \
 			fi; \
-			rm -rf -- "$${temp_dir}"; \
+			if [ "$${restore_failed}" = false ]; then \
+				rm -rf -- "$${temp_dir}"; \
+			fi; \
 			exit "$${status}"; \
 		}; \
 		trap cleanup EXIT HUP INT TERM; \
 		umask 077; \
+		holder_digest="$$( \
+			{ \
+				git -C ../.. rev-parse --verify HEAD; \
+				printf '%s\n' "$(ENV)" "$$$$" "$$(date -u +%s)"; \
+			} | shasum -a 256 | awk '{print $$1}' \
+		)"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+			"apply:$${holder_digest}" "$${lease_token}"; \
+		lease_acquired=true; \
+		test -f "$(WORKLOAD_PLAN)" || { \
+			printf "Missing reviewed workload plan %s. Run 'make workload-plan' first.\n" "$(WORKLOAD_PLAN)" >&2; \
+			exit 1; \
+		}; \
+		test -f "$(WORKLOAD_PLAN_MANIFEST)" || { \
+			printf "Missing workload plan provenance %s. Run 'make workload-plan' first.\n" "$(WORKLOAD_PLAN_MANIFEST)" >&2; \
+			exit 1; \
+		}; \
 		./scripts/assert-workload-artifacts.sh \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(PREFIX)" \
 			"$(WORKLOAD_IMAGE_REVISION)" "$(GCLOUD)" \
@@ -338,17 +394,6 @@ workload-apply:
 		$(workload_metadata_context) ./scripts/workload-plan-metadata.sh verify \
 			"$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)" "$(TF)" "." "../.." \
 			"$${before_artifacts}"; \
-		holder_digest="$$( \
-			{ \
-				shasum -a 256 "$(WORKLOAD_PLAN)"; \
-				shasum -a 256 "$(WORKLOAD_PLAN_MANIFEST)"; \
-			} | shasum -a 256 | awk '{print $$1}' \
-		)"; \
-		"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
-			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
-			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
-			"workload:$${holder_digest}" "$${lease_token}"; \
-		lease_acquired=true; \
 		cp "$(WORKLOAD_PLAN)" "$${apply_plan}"; \
 		cp "$(WORKLOAD_PLAN_MANIFEST)" "$${apply_manifest}"; \
 		chmod 0600 "$${apply_plan}" "$${apply_manifest}"; \
@@ -357,7 +402,8 @@ workload-apply:
 			"$${before_artifacts}"; \
 		./scripts/assert-workload-plan.sh \
 			"$${apply_plan}" "$(TF)" \
-			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"; \
+			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
+			"$${before_artifacts}"; \
 		./scripts/assert-workload-quota.sh \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCLOUD)"; \
@@ -389,9 +435,14 @@ workload-apply:
 			printf "Applied reviewed bytes, but the published plan changed concurrently; preserving the replacement.\n" >&2; \
 			exit 1; \
 		fi; \
-		rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"; \
+		mv "$(WORKLOAD_PLAN)" "$${consumed_plan}"; \
+		plan_moved=true; \
+		mv "$(WORKLOAD_PLAN_MANIFEST)" "$${consumed_manifest}"; \
+		manifest_moved=true; \
 		"$(WORKLOAD_ROLLOUT_LEASE)" release "$(GCLOUD)" "$${lease_token}"; \
 		lease_acquired=false; \
+		plan_moved=false; \
+		manifest_moved=false; \
 		rm -rf -- "$${temp_dir}"; \
 		trap - EXIT HUP INT TERM
 

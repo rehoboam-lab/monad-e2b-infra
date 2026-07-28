@@ -94,8 +94,20 @@ require_context() {
 configuration_sha256() {
   local config_root="$1"
   local repo_root="$2"
+  local modules_root
   local file
   local relative
+
+  modules_root="${repo_root}/iac/modules"
+  [[ -d "${modules_root}" ]] || {
+    printf 'Local Terraform modules directory is missing: %s\n' \
+      "${modules_root}" >&2
+    exit 1
+  }
+  if find "${config_root}" "${modules_root}" -type l -print -quit | grep -q .; then
+    printf 'Workload Terraform release inputs must not contain symlinks.\n' >&2
+    exit 1
+  fi
 
   {
     while IFS= read -r -d '' file; do
@@ -107,6 +119,22 @@ configuration_sha256() {
         -path "${config_root}/.packer-plugins" -prune -o \
         -path "${config_root}/.workload-plan.*" -prune -o \
         -path "${config_root}/.workload-apply.*" -prune -o \
+        -path "${config_root}/.workload-plan-check.*" -prune -o \
+        -type f \
+        ! -name '.tfplan*' \
+        ! -name '*.tfstate' \
+        ! -name '*.tfstate.*' \
+        ! -name '.terraform.tfstate.lock.info' \
+        -print0 \
+        | LC_ALL=C sort -z
+    )
+    while IFS= read -r -d '' file; do
+      relative="${file#"${modules_root}/"}"
+      printf 'module:%s\t%s\n' "${relative}" "$(sha256_file "${file}")"
+    done < <(
+      find "${modules_root}" \
+        -path "${modules_root}/.terraform" -prune -o \
+        -path "${modules_root}/.packer-plugins" -prune -o \
         -type f \
         ! -name '.tfplan*' \
         ! -name '*.tfstate' \

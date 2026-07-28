@@ -36,6 +36,7 @@ orchestrator_image="$(
   and (.name | length) > 0
   and (.selfLink | type) == "string"
   and (.selfLink | length) > 0
+  and .status == "READY"
   and (
     (.deprecated.state? // "")
     | IN("", "ACTIVE")
@@ -44,6 +45,8 @@ orchestrator_image="$(
   if .
   then {
     family: "e2b-orch",
+    project: $project_id,
+    status: $input.status,
     name: $input.name,
     self_link: $input.selfLink,
     id: (
@@ -52,7 +55,9 @@ orchestrator_image="$(
   }
   else error("no active concrete image")
   end
-  ' --argjson input "${family_json}" <<<"${family_json}"
+  ' \
+    --arg project_id "${project_id}" \
+    --argjson input "${family_json}" <<<"${family_json}"
 )" || {
   printf 'Required GCE image family e2b-orch has no active concrete image.\n' >&2
   exit 1
@@ -118,17 +123,21 @@ for image in "${images[@]}"; do
       --arg image "${image}" \
       --arg revision_ref "${image_root}:${revision}" \
       --arg revision_digest "${revision_digest}" \
+      --arg revision_resolved_ref "${image_root}@${revision_digest}" \
       --arg latest_ref "${image_root}:latest" \
-      --arg latest_digest "${latest_digest}" '
+      --arg latest_digest "${latest_digest}" \
+      --arg latest_resolved_ref "${image_root}@${latest_digest}" '
         . + {
           ($image): {
             revision: {
               reference: $revision_ref,
-              digest: $revision_digest
+              digest: $revision_digest,
+              resolved_reference: $revision_resolved_ref
             },
             latest: {
               reference: $latest_ref,
-              digest: $latest_digest
+              digest: $latest_digest,
+              resolved_reference: $latest_resolved_ref
             }
           }
         }

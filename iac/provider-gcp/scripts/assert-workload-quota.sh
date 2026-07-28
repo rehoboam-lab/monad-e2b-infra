@@ -91,14 +91,14 @@ live_json="$(
 )"
 for quota_name in \
   instances \
-  e2_vcpus \
+  regional_cpus \
   pd_ssd_gb \
   pd_standard_gb \
   local_ssd_gb \
   regional_public_ips; do
   case "${quota_name}" in
     instances) metric="INSTANCES" ;;
-    e2_vcpus) metric="E2_CPUS" ;;
+    regional_cpus) metric="CPUS" ;;
     pd_ssd_gb) metric="SSD_TOTAL_GB" ;;
     pd_standard_gb) metric="DISKS_TOTAL_GB" ;;
     local_ssd_gb) metric="LOCAL_SSD_TOTAL_GB" ;;
