@@ -1,0 +1,103 @@
+# Monad GCP F1.0 — keyless foundation
+
+This fork deliberately separates a zero-workload GCP foundation from the E2B
+runtime cluster. Engram's organisation policy forbids long-lived Google
+service-account keys. The fork removes those key resources, and a full cluster
+plan is blocked until all runtime consumers use attached service accounts,
+Application Default Credentials, or Workload Identity.
+
+## F1.0 creates
+
+- the Terraform state bucket;
+- required project APIs;
+- service-account identities without private keys;
+- Secret Manager containers and generated control-plane secrets;
+- Artifact Registry repositories;
+- GCS buckets and their IAM bindings.
+
+It does not create the Nomad/Consul cluster, API nodes, ClickHouse, build nodes,
+sandbox nodes, workload VMs, or Packer image.
+
+## Prerequisites
+
+1. Authenticate both the CLI and Terraform:
+
+   ```bash
+   gcloud auth login
+   gcloud auth application-default login
+   gcloud config set project monad-code
+   ```
+
+2. Copy `.env.gcp.template` to an ignored environment file and set only
+   non-secret deployment metadata there.
+
+3. Obtain the Cloudflare token and Postgres connection string, but do not put
+   either value in the environment file. The foundation creates their empty
+   Secret Manager containers; versions are added out-of-band only after the
+   reviewed foundation apply.
+4. Request the documented regional SSD quota before the workload phase.
+
+## Reviewable workflow
+
+```bash
+make set-env ENV=dev
+make -C iac/provider-gcp foundation-init
+make -C iac/provider-gcp foundation-plan
+terraform -chdir=iac/provider-gcp show .tfplan.foundation.dev
+make -C iac/provider-gcp foundation-apply \
+  CONFIRM='APPLY KEYLESS FOUNDATION'
+make -C iac/provider-gcp foundation-destroy-plan
+terraform -chdir=iac/provider-gcp show .tfplan.foundation-destroy.dev
+rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
+```
+
+`foundation-plan` targets only `module.init`. `foundation-apply` consumes the
+exact saved plan and requires a literal confirmation. It never invokes Packer
+and forces Anywhere Cache off even if an environment file says otherwise.
+
+The legacy `make init` path is disabled in the Monad fork. Workload modules
+depend on a hard-fail credential guard which has no variable escape hatch. The
+patch that completes and verifies the keyless migration must remove that guard
+as an explicit reviewed change.
+
+All generic workload plan/apply/import/move Make targets are disabled during
+F1.0, including stale saved-plan apply paths. The supported foundation workflow
+also refuses existing state outside `module.init`, long-lived credential state,
+changes outside `module.init`, and any destructive plan. Direct targeted
+Terraform commands are unsupported in this phase. A later patch should split
+foundation and workload into separate Terraform roots/states, removing the
+need for `-target`.
+
+After the foundation apply, add the first secret versions directly over stdin
+so values never enter shell history. Replace `<prefix>` with the configured
+prefix (the template default is `e2b-`), paste one value, then send EOF:
+
+```bash
+gcloud secrets versions add <prefix>cloudflare-api-token --data-file=-
+gcloud secrets versions add <prefix>postgres-connection-string --data-file=-
+```
+
+These versions are workload prerequisites. They are not inputs to the F1.0
+foundation plan and their values must not appear in Terraform state.
+
+Saved Terraform plans contain cleartext configuration and input values,
+including sensitive values. `foundation-plan` creates its plan with mode 0600.
+Keep it on the trusted operator machine, do not upload it or persist
+`terraform show -json` output, and remove an abandoned plan with:
+
+```bash
+rm -f iac/provider-gcp/.tfplan.foundation.dev
+rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
+```
+
+## Exit evidence
+
+- Terraform state is remote, versioned, and recoverable.
+- No `google_service_account_key` resource exists in state.
+- No workload VM or external IP exists.
+- Secret values are out-of-band and absent from Git and plan output.
+- The plan contains only reviewed foundation resources.
+- A destroy plan has been inspected.
+
+The next milestone is the keyless runtime credential migration, followed by the
+smallest reference fleet and stock SDK create/pause/resume/fork canary.
