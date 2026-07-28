@@ -1,0 +1,83 @@
+name: Monad Terraform Validation
+
+on:
+  pull_request:
+    paths:
+      - "iac/provider-gcp/**"
+      - ".tool-versions"
+      - ".github/workflows/monad-terraform-validation.yml"
+      - ".github/upstream-workflows-disabled/**"
+  push:
+    branches: [main]
+    paths:
+      - "iac/provider-gcp/**"
+      - ".tool-versions"
+      - ".github/workflows/monad-terraform-validation.yml"
+      - ".github/upstream-workflows-disabled/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monad-terraform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Keyless GCP configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Terraform version
+        id: terraform-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '$1 == "terraform" { print $2; exit }' .tool-versions)"
+          test -n "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ steps.terraform-version.outputs.version }}
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive iac/provider-gcp
+
+      - name: Initialise without a backend
+        run: terraform -chdir=iac/provider-gcp init -backend=false -input=false
+
+      - name: Validate configuration
+        run: terraform -chdir=iac/provider-gcp validate
+
+      - name: Keep inherited automation dormant
+        shell: bash
+        run: |
+          set -euo pipefail
+          for workflow in \
+            build-and-upload-images.yml \
+            deploy-base-template.yml \
+            periodic-test.yml \
+            pr-go-dependbot-cleanup.yml \
+            promote-envd.yml \
+            publish.yml \
+            pull-request.yml \
+            push-main.yml \
+            release-please.yml
+          do
+            test ! -e ".github/workflows/$workflow" || {
+              echo "unsafe inherited workflow was reactivated: $workflow" >&2
+              exit 1
+            }
+            test -f ".github/upstream-workflows-disabled/$workflow" || {
+              echo "disabled upstream workflow reference is missing: $workflow" >&2
+              exit 1
+            }
+          done
