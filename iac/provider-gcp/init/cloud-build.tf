@@ -26,14 +26,33 @@ resource "google_service_account" "image_builder" {
   depends_on = [google_project_service.cloud_build_api]
 }
 
-data "google_storage_bucket" "cloud_build_source" {
-  name = "${var.gcp_project_id}_cloudbuild"
+resource "google_storage_bucket" "cloud_build_source" {
+  name     = "${var.bucket_prefix}cloud-build-source"
+  location = var.gcp_region
 
-  depends_on = [google_project_service.cloud_build_api]
+  public_access_prevention    = "enforced"
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+
+  labels = var.labels
+
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    condition {
+      age = 7
+    }
+
+    action {
+      type = "Delete"
+    }
+  }
 }
 
 resource "google_storage_bucket_iam_member" "cloud_build_source_reader" {
-  bucket = data.google_storage_bucket.cloud_build_source.name
+  bucket = google_storage_bucket.cloud_build_source.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.image_builder.email}"
 }
