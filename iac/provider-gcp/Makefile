@@ -1,9 +1,10 @@
-ENV := $(shell cat ../../.last_used_env || echo "not-set")
+ENV := $(shell cat ../../.last_used_env 2>/dev/null || echo "not-set")
 ENV_FILE := ../../.env.${ENV}
 
 -include ${ENV_FILE}
 
 TF := $(shell which terraform)
+EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../.tool-versions)
 TF_VAR_FILE := ./.terraform.${ENV}.tfvars
 TF_VAR_FILE_ARG := $(if $(wildcard $(TF_VAR_FILE)),-var-file=$(TF_VAR_FILE))
 TERRAFORM_STATE_BUCKET ?= $(GCP_PROJECT_ID)-terraform-state
@@ -121,8 +122,18 @@ foundation-config-guard:
 	@ test -n "$(GCP_REGION)" || (printf "GCP_REGION is required.\n"; exit 1)
 	@ test -n "$(TERRAFORM_STATE_BUCKET)" && test "$(TERRAFORM_STATE_BUCKET)" != "-terraform-state" || (printf "A valid TERRAFORM_STATE_BUCKET is required.\n"; exit 1)
 
+.PHONY: foundation-toolchain-guard
+foundation-toolchain-guard:
+	@ test -n "$(EXPECTED_TERRAFORM_VERSION)" || (printf "No Terraform version is pinned in ../../.tool-versions.\n"; exit 1)
+	@ test -n "$(TF)" && test -x "$(TF)" || (printf "Terraform is not installed or not executable.\n"; exit 1)
+	@ actual_version="$$("$(TF)" version -json | jq -r '.terraform_version')"; \
+	if [ "$$actual_version" != "$(EXPECTED_TERRAFORM_VERSION)" ]; then \
+		printf "Terraform %s is required; found %s at %s.\n" "$(EXPECTED_TERRAFORM_VERSION)" "$$actual_version" "$(TF)"; \
+		exit 1; \
+	fi
+
 .PHONY: foundation-init
-foundation-init: foundation-config-guard
+foundation-init: foundation-config-guard foundation-toolchain-guard
 	@ printf "Initializing keyless foundation state for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
 	@ gcloud storage buckets create gs://$(TERRAFORM_STATE_BUCKET) --location $(GCP_REGION) --project $(GCP_PROJECT_ID) --default-storage-class STANDARD --uniform-bucket-level-access > /dev/null 2>&1 || true
 	@ gcloud storage buckets update gs://$(TERRAFORM_STATE_BUCKET) --versioning --soft-delete-duration=30d
@@ -130,7 +141,7 @@ foundation-init: foundation-config-guard
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 
 .PHONY: foundation-plan
-foundation-plan: foundation-config-guard
+foundation-plan: foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning keyless foundation only for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ $(call tf_fmt)
@@ -144,7 +155,7 @@ foundation-plan: foundation-config-guard
 	@ ./scripts/assert-foundation-plan.sh "$(FOUNDATION_PLAN)" "$(TF)" apply
 
 .PHONY: foundation-apply
-foundation-apply: foundation-config-guard
+foundation-apply: foundation-config-guard foundation-toolchain-guard
 	@ if [ "$(CONFIRM)" != "$(FOUNDATION_CONFIRMATION)" ]; then \
 		printf "Refusing foundation apply. Re-run with CONFIRM='$(FOUNDATION_CONFIRMATION)'.\n"; \
 		exit 1; \
@@ -156,7 +167,7 @@ foundation-apply: foundation-config-guard
 	@ rm $(FOUNDATION_PLAN)
 
 .PHONY: foundation-destroy-plan
-foundation-destroy-plan: foundation-config-guard
+foundation-destroy-plan: foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning review-only foundation destroy for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ umask 077; $(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
