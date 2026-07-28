@@ -8,20 +8,25 @@ packer {
   }
 }
 
+locals {
+  quota_policy  = jsondecode(file(abspath("${path.root}/../topology/minimal-workload-policy.json")))
+  quota_reserve = local.quota_policy.transient_reserve
+}
+
 source "googlecompute" "orch" {
   image_family = "${var.prefix}orch"
 
   # TODO: Overwrite the image instead of creating timestamped images every time we build its
-  image_name    = "${var.prefix}orch-${formatdate("YYYY-MM-DD-hh-mm-ss", timestamp())}"
-  project_id    = var.gcp_project_id
-  source_image  = var.source_image
-  ssh_username  = "ubuntu"
-  zone          = var.gcp_zone
-  disk_size     = 10
-  disk_type     = "pd-ssd"
+  image_name   = "${var.prefix}orch-${formatdate("YYYY-MM-DD-hh-mm-ss", timestamp())}"
+  project_id   = var.gcp_project_id
+  source_image = var.source_image
+  ssh_username = "ubuntu"
+  zone         = var.gcp_zone
+  disk_size    = local.quota_reserve.pd_ssd_gb
+  disk_type    = local.quota_reserve.disk_type
 
   # This is used only for building the image and the GCE VM is then deleted
-  machine_type = "n1-standard-4"
+  machine_type = local.quota_reserve.machine_type
 
   # Enable nested virtualization
   image_licenses = ["projects/vm-options/global/licenses/enable-vmx"]
@@ -30,6 +35,8 @@ source "googlecompute" "orch" {
   network    = var.network_name
   subnetwork = var.subnet_name
   use_iap    = true
+  # Reserve one regional public IP conservatively while the builder exists.
+  omit_external_ip = local.quota_reserve.regional_public_ips == 0
 }
 
 locals {

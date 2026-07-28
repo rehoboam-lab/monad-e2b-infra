@@ -365,10 +365,12 @@ flowchart TB
   template caches. Autoscaled.
 - **Build nodes** run the same binary in template-manager mode; the `nomad-nodepool-apm`
   autoscaler plugin scales the job with the node pool.
-- **Worker rollouts** cap each default three-zone regional MIG at three surge instances. That
-  bounds quota exposure but does not drain workloads: before replacing a worker template, the
-  operator must pause/snapshot active sandboxes, verify durable uploads, stop placement, drain
-  Nomad allocations, and verify MIG stability. Automated drain orchestration is not implemented.
+- The quota-constrained **dev operator canary** gives server and worker regional MIGs zero surge
+  and one unavailable instance, so they replace in place. The API zonal MIG retains one surge
+  instance. Non-dev keeps the upstream rollout policies. Zero surge does not drain workloads:
+  before replacing a worker template, the operator must pause/snapshot active sandboxes, verify
+  durable uploads, stop placement, drain Nomad allocations, and verify MIG stability. Automated
+  drain orchestration is not implemented, and Packer image builds must not overlap a rollout.
 - **ClickHouse nodes** have an explicit MIG target size equal to the configured ClickHouse cluster
   size so the instance count cannot silently remain at the provider default.
 - PostgreSQL is external (connection string via secrets); Redis runs as a Nomad job or as a

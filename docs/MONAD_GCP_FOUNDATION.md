@@ -81,39 +81,40 @@ make -C iac/provider-gcp workload-plan-check \
   WORKLOAD_PLAN=.tfplan.dev
 ```
 
-The checked-in minimal-workload policy expects these maximum role counts:
-three Nomad/Consul servers, one API node, one ClickHouse node, one build node,
-up to two sandbox client nodes, and no Loki node. The worker regional MIGs use
-the GCP default three-zone distribution. Their fixed rollout surge is capped
-at three—the minimum valid non-zero fixed value for a default regional MIG
-according to [Google's regional MIG update rules](https://cloud.google.com/compute/docs/instance-groups/rolling-out-updates-to-managed-instance-groups#updating_a_regional_managed_instance_group).
+The checked-in operator-canary policy expects three Nomad/Consul servers, one
+API node, one build node, one sandbox client node, and no ClickHouse or Loki
+node. Server and worker regional MIGs have zero automated surge and replace one
+instance in place; the API zonal MIG retains one surge instance. The example
+environment fixes those counts, machine types, and disks instead of enabling a
+worker autoscaler.
 
-The plan guard derives autoscaler maxima, fixed role sizes, and every MIG's
-rollout surge from `terraform show -json`. For the minimal policy it permits
-eight maximum steady-state instances plus ten rollout instances, for a peak of
-18. The policy's 24-instance planning assumption therefore reserves six
-instances of headroom. This is not live quota evidence: immediately before
-apply, re-check the selected region's instance, CPU, SSD, local SSD, address,
-and relevant per-machine-family quotas. Increase the policy only through a
-reviewed change supported by updated cost and capacity evidence.
+The guard derives every role's fixed size, machine type, vCPU count, disk quota
+class, local SSD, public-IP requirement, and rollout surge from
+`terraform show -json`. `pd-balanced` and `pd-ssd` both count against the SSD
+quota. Unknown instance templates, disk types, standalone VM/disk/address
+resources, autoscalers, unresolved values, destructive MIG changes, and
+in-place capacity reductions are rejected.
 
-Read-only quota inspection on 2026-07-28 found the following current limits
-with zero usage in both candidate regions:
+The base fleet is six VMs and 26 vCPUs. Two transient scenarios are reviewed:
 
-- `australia-southeast1`: 24 instances, 100 vCPUs, 500 GB persistent SSD, and
-  eight in-use addresses;
-- `us-east4`: 24 instances, 200 vCPUs, 500 GB persistent SSD, and eight in-use
-  addresses.
+- an API rollout adds one `e2-standard-4` VM and 200 GB standard PD;
+- a Packer image build adds one `n1-standard-4` VM, 10 GB SSD PD, and one
+  conservatively reserved public IP.
 
-The instance guard does not imply that those other quotas are sufficient.
-Using the checked-in machine and disk defaults, the maximal steady topology is
-approximately 38 vCPUs and 1,160 GB of persistent SSD; a full simultaneous MIG
-rollout can reach approximately 96 vCPUs and 2,620 GB of persistent SSD. The
-maximal steady topology also uses eight public addresses before any substitute
-instances are created. These are configuration-derived estimates, not a
-replacement for reviewing the real saved plan. The workload apply remains
-blocked until SSD and address quota or network/disk choices are changed, and
-the saved plan proves adequate headroom for every quota dimension.
+Those scenarios are mutually exclusive. Never run Packer while any MIG rollout
+is active. Adding both at once would require eight VMs and 34 vCPUs, exceeding
+the reviewed 32-vCPU limit. The guard takes the maximum usage across the two
+serialized scenarios, yielding seven VMs, 30 vCPUs, 470 GB SSD PD, 400 GB
+standard PD, 750 GB local SSD, and seven regional public IPs.
+
+The reviewed hard limits are 24 instances, 32 global vCPUs, 500 GB SSD PD,
+4,096 GB standard PD, 6,000 GB N1 local SSD, and eight regional public IPs.
+The policy and the Packer source are both checked in CI, including the static
+Packer machine/disk/IP reserve. Any policy limit change or plan usage drift
+fails closed. These values remain a reviewed snapshot rather than live quota
+evidence: immediately before apply, re-check every limit and current usage in
+the selected project and region. Do not raise the checked-in limits without
+updated quota evidence and review.
 
 The capacity limit does not make worker replacement safe. Snapshot or pause
 every active sandbox, wait for snapshot uploads to become durable, stop new

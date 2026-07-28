@@ -6,6 +6,174 @@
   "errored": false,
   "resource_changes": [
     {
+      "address": "module.cluster.google_compute_instance_template.server",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "server",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "e2-standard-2",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 20,
+              "disk_type": "pd-ssd",
+              "type": "PERSISTENT"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_template.api",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "api",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "e2-standard-4",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 200,
+              "disk_type": "pd-standard",
+              "type": "PERSISTENT"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_template.clickhouse",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "clickhouse",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "e2-standard-4",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 200,
+              "disk_type": "pd-standard",
+              "type": "PERSISTENT"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_template.loki",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "loki",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "e2-standard-4",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 200,
+              "disk_type": "pd-standard",
+              "type": "PERSISTENT"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "template",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "n1-standard-8",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 200,
+              "disk_type": "pd-ssd",
+              "type": "PERSISTENT"
+            },
+            {
+              "boot": false,
+              "disk_size_gb": 375,
+              "disk_type": "local-ssd",
+              "type": "SCRATCH"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template",
+      "mode": "managed",
+      "type": "google_compute_instance_template",
+      "name": "template",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "machine_type": "n1-standard-8",
+          "disk": [
+            {
+              "boot": true,
+              "disk_size_gb": 200,
+              "disk_type": "pd-ssd",
+              "type": "PERSISTENT"
+            },
+            {
+              "boot": false,
+              "disk_size_gb": 375,
+              "disk_type": "local-ssd",
+              "type": "SCRATCH"
+            }
+          ],
+          "network_interface": [
+            {
+              "access_config": [{}]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
       "address": "module.cluster.google_compute_region_instance_group_manager.server_pool",
       "mode": "managed",
       "type": "google_compute_region_instance_group_manager",
@@ -16,8 +184,9 @@
           "target_size": 3,
           "update_policy": [
             {
-              "max_surge_fixed": 3,
-              "max_surge_percent": null
+              "max_surge_fixed": 0,
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
@@ -35,7 +204,8 @@
           "update_policy": [
             {
               "max_surge_fixed": 1,
-              "max_surge_percent": null
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
@@ -49,11 +219,12 @@
       "change": {
         "actions": ["create"],
         "after": {
-          "target_size": 1,
+          "target_size": 0,
           "update_policy": [
             {
               "max_surge_fixed": 0,
-              "max_surge_percent": null
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
@@ -71,7 +242,8 @@
           "update_policy": [
             {
               "max_surge_fixed": 1,
-              "max_surge_percent": null
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
@@ -88,8 +260,9 @@
           "target_size": 1,
           "update_policy": [
             {
-              "max_surge_fixed": 3,
-              "max_surge_percent": null
+              "max_surge_fixed": 0,
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
@@ -103,29 +276,12 @@
       "change": {
         "actions": ["create"],
         "after": {
-          "target_size": null,
+          "target_size": 1,
           "update_policy": [
             {
-              "max_surge_fixed": 3,
-              "max_surge_percent": null
-            }
-          ]
-        }
-      }
-    },
-    {
-      "address": "module.cluster.module.client_cluster[\"default\"].google_compute_region_autoscaler.autoscaler[0]",
-      "mode": "managed",
-      "type": "google_compute_region_autoscaler",
-      "name": "autoscaler",
-      "index": 0,
-      "change": {
-        "actions": ["create"],
-        "after": {
-          "autoscaling_policy": [
-            {
-              "max_replicas": 2,
-              "min_replicas": 1
+              "max_surge_fixed": 0,
+              "max_surge_percent": null,
+              "max_unavailable_fixed": 1
             }
           ]
         }
