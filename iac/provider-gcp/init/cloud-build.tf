@@ -26,6 +26,18 @@ resource "google_service_account" "image_builder" {
   depends_on = [google_project_service.cloud_build_api]
 }
 
+data "google_storage_bucket" "cloud_build_source" {
+  name = "${var.gcp_project_id}_cloudbuild"
+
+  depends_on = [google_project_service.cloud_build_api]
+}
+
+resource "google_storage_bucket_iam_member" "cloud_build_source_reader" {
+  bucket = data.google_storage_bucket.cloud_build_source.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.image_builder.email}"
+}
+
 resource "google_project_iam_member" "cloud_build_service_agent" {
   project = var.gcp_project_id
   role    = "roles/cloudbuild.serviceAgent"
