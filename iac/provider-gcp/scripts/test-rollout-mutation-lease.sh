@@ -67,7 +67,7 @@ uri_path="${FAKE_GCS_ROOT}/state-bucket/operator-locks/test-project/us-east4/wor
 "${lease_script}" acquire \
   "${fake_gcloud}" state-bucket test-project us-east4 "${holder}" "${token}"
 [[ -f "${token}" ]]
-[[ "$(stat -f '%Lp' "${token}" 2>/dev/null || stat -c '%a' "${token}")" == "600" ]]
+[[ "$(stat -c '%a' "${token}" 2>/dev/null || stat -f '%Lp' "${token}")" == "600" ]]
 [[ -f "${uri_path}" ]]
 
 if "${lease_script}" acquire \

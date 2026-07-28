@@ -51,10 +51,10 @@ assert_private_regular_file() {
   local mode_bits
 
   assert_regular_file "${path}" "${label}"
-  if mode_bits="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode_bits="$(stat -c '%a' "${path}" 2>/dev/null)"; then
     :
   else
-    mode_bits="$(stat -c '%a' "${path}")"
+    mode_bits="$(stat -f '%Lp' "${path}")"
   fi
   if (( (8#${mode_bits} & 077) != 0 )); then
     printf '%s must not be readable or writable by group/other: %s (mode %s)\n' \
@@ -104,14 +104,14 @@ configuration_sha256() {
     done < <(
       find "${config_root}" \
         -path "${config_root}/.terraform" -prune -o \
+        -path "${config_root}/.packer-plugins" -prune -o \
+        -path "${config_root}/.workload-plan.*" -prune -o \
+        -path "${config_root}/.workload-apply.*" -prune -o \
         -type f \
-        \( \
-          -name '*.tf' \
-          -o -name '*.tf.json' \
-          -o -name '.terraform.lock.hcl' \
-          -o -name 'Makefile' \
-          -o -path '*/scripts/*.sh' \
-        \) \
+        ! -name '.tfplan*' \
+        ! -name '*.tfstate' \
+        ! -name '*.tfstate.*' \
+        ! -name '.terraform.tfstate.lock.info' \
         -print0 \
         | LC_ALL=C sort -z
     )

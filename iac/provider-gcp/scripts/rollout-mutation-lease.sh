@@ -145,11 +145,8 @@ case "${mode}" in
       exit 1
     }
     token_mode="$(
-      if stat -f '%Lp' "${token_file}" >/dev/null 2>&1; then
-        stat -f '%Lp' "${token_file}"
-      else
-        stat -c '%a' "${token_file}"
-      fi
+      stat -c '%a' "${token_file}" 2>/dev/null \
+        || stat -f '%Lp' "${token_file}"
     )"
     if (( (8#${token_mode} & 077) != 0 )); then
       printf 'Lease token must be private (mode 0600 or stricter): %s\n' \

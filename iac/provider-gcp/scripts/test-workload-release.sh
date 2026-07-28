@@ -268,6 +268,7 @@ terraform {
 EOF
 printf 'provider lock\n' >"${config_root}/.terraform.lock.hcl"
 printf 'guard\n' >"${config_root}/scripts/guard.sh"
+printf 'validator\n' >"${config_root}/scripts/validator.jq"
 printf 'make\n' >"${config_root}/Makefile"
 cp "${policy}" "${config_root}/topology/policy.json"
 cp \
@@ -318,7 +319,7 @@ expect_pass \
   "${script_dir}/workload-plan-metadata.sh" \
   write "${plan}" "${manifest}" "${fake_terraform}" \
   "${config_root}" "${repo_root}" "${artifacts_file}" "${fingerprint}"
-test "$(stat -f '%Lp' "${manifest}" 2>/dev/null || stat -c '%a' "${manifest}")" = "600"
+test "$(stat -c '%a' "${manifest}" 2>/dev/null || stat -f '%Lp' "${manifest}")" = "600"
 jq -e \
   --arg plan_sha256 "$(shasum -a 256 "${plan}" | awk '{print $1}')" \
   --arg git_head "$(git -C "${repo_root}" rev-parse HEAD)" \
@@ -418,6 +419,14 @@ terraform {
   required_version = "=1.7.5"
 }
 EOF
+
+printf '# validator drift\n' >>"${config_root}/scripts/validator.jq"
+expect_fail \
+  "non-shell validator drift invalidates workload plan" \
+  "${script_dir}/workload-plan-metadata.sh" \
+  verify "${plan}" "${manifest}" "${fake_terraform}" \
+  "${config_root}" "${repo_root}" "${artifacts_file}"
+printf 'validator\n' >"${config_root}/scripts/validator.jq"
 
 printf 'tampered\n' >>"${plan}"
 expect_fail \
@@ -527,6 +536,15 @@ case "${1:-}" in
   apply)
     [[ "${2:-}" == "-input=false" ]] || exit 2
     [[ -f "${3:-}" ]] || exit 2
+    [[ "${3:-}" != "${WORKFLOW_SHARED_PLAN}" ]] || {
+      printf 'apply used mutable published plan path\n' >&2
+      exit 2
+    }
+    if [[ "${mode}" == "replace-shared-during-apply" ]]; then
+      printf 'replacement plan\n' >"${WORKFLOW_SHARED_PLAN}"
+      printf 'replacement manifest\n' >"${WORKFLOW_SHARED_MANIFEST}"
+      chmod 0600 "${WORKFLOW_SHARED_PLAN}" "${WORKFLOW_SHARED_MANIFEST}"
+    fi
     [[ "${mode}" != "apply-fail" ]] || exit 1
     ;;
   *)
@@ -555,6 +573,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${WORKFLOW_LEASE_LOG}"
 case "${1:-}" in
   acquire)
+    [[ "$(cat "${WORKFLOW_MODE_FILE}")" != "lease-acquire-fail" ]] || exit 1
     token="${7:?missing token}"
     umask 077
     printf '%s\n' '{"fixture":"lease"}' >"${token}"
@@ -598,9 +617,17 @@ run_workflow_make() {
 
 workflow_plan="${workflow_provider}/.tfplan.workload.dev"
 workflow_manifest="${workflow_plan}.manifest"
+export WORKFLOW_SHARED_PLAN="${workflow_plan}"
+export WORKFLOW_SHARED_MANIFEST="${workflow_manifest}"
 printf 'stale plan\n' >"${workflow_plan}"
 printf 'stale manifest\n' >"${workflow_manifest}"
 chmod 0600 "${workflow_plan}" "${workflow_manifest}"
+printf 'lease-acquire-fail\n' >"${workflow_mode}"
+expect_fail "failed plan lease preserves the previously reviewed release" \
+  run_workflow_make workload-plan
+test "$(cat "${workflow_plan}")" = "stale plan"
+test "$(cat "${workflow_manifest}")" = "stale manifest"
+
 printf 'plan-fail\n' >"${workflow_mode}"
 expect_fail "failed plan invalidates old plan and manifest" \
   run_workflow_make workload-plan
@@ -612,9 +639,12 @@ expect_pass "full workload plan publishes private reviewed bytes" \
   run_workflow_make workload-plan
 test -f "${workflow_plan}"
 test -f "${workflow_manifest}"
-test "$(stat -f '%Lp' "${workflow_plan}" 2>/dev/null || stat -c '%a' "${workflow_plan}")" = "600"
-test "$(stat -f '%Lp' "${workflow_manifest}" 2>/dev/null || stat -c '%a' "${workflow_manifest}")" = "600"
+test "$(stat -c '%a' "${workflow_plan}" 2>/dev/null || stat -f '%Lp' "${workflow_plan}")" = "600"
+test "$(stat -c '%a' "${workflow_manifest}" 2>/dev/null || stat -f '%Lp' "${workflow_manifest}")" = "600"
 test -z "$(find "${workflow_provider}" -maxdepth 1 -type d -name '.workload-plan.*' -print)"
+test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 3
+test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 2
+: >"${workflow_lease_log}"
 initial_plan_command="$(
   grep '^plan ' "${workflow_terraform_log}" | head -1
 )"
@@ -645,13 +675,24 @@ test -f "${workflow_manifest}"
 test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 2
 test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 2
 
+printf 'replace-shared-during-apply\n' >"${workflow_mode}"
+expect_fail "concurrent published-plan replacement is preserved" \
+  run_workflow_make workload-apply CONFIRM='APPLY ONE WORKCELL CANARY'
+test "$(cat "${workflow_plan}")" = "replacement plan"
+test "$(cat "${workflow_manifest}")" = "replacement manifest"
+test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 3
+test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 3
+
 printf 'pass\n' >"${workflow_mode}"
+expect_pass "replacement can be superseded by a newly reviewed plan" \
+  run_workflow_make workload-plan
+: >"${workflow_lease_log}"
 expect_pass "clean saved-plan apply consumes release exactly once" \
   run_workflow_make workload-apply CONFIRM='APPLY ONE WORKCELL CANARY'
 test ! -e "${workflow_plan}"
 test ! -e "${workflow_manifest}"
-test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 3
-test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 3
+test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1
+test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 1
 test -z "$(find "${workflow_provider}" -maxdepth 1 -type d -name '.workload-apply.*' -print)"
 
 workload_plan_recipe="$(
@@ -675,6 +716,24 @@ grep -F 'mktemp -d ".workload-plan.$(ENV).XXXXXX"' \
 grep -F 'chmod 0600 "$${temp_plan}"' <<<"${workload_plan_recipe}" >/dev/null
 grep -F './scripts/assert-workload-plan.sh' <<<"${workload_plan_recipe}" >/dev/null
 grep -F './scripts/assert-workload-quota.sh' <<<"${workload_plan_recipe}" >/dev/null
+grep -F '"$(WORKLOAD_ROLLOUT_LEASE)" acquire' \
+  <<<"${workload_plan_recipe}" >/dev/null
+grep -F '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
+  <<<"${workload_plan_recipe}" >/dev/null
+plan_acquire_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" acquire' \
+    <<<"${workload_plan_recipe}" | cut -d: -f1
+)"
+plan_remove_line="$(
+  grep -nF 'rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"' \
+    <<<"${workload_plan_recipe}" | cut -d: -f1
+)"
+plan_final_release_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
+    <<<"${workload_plan_recipe}" | tail -1 | cut -d: -f1
+)"
+test "${plan_acquire_line}" -lt "${plan_remove_line}"
+test "${plan_remove_line}" -lt "${plan_final_release_line}"
 if grep -E -- '(^|[[:space:]])(-target|-destroy)(=|[[:space:]])' \
   <<<"${workload_plan_recipe}" >/dev/null; then
   printf 'workload-plan must remain a full, non-destroy Terraform plan\n' >&2
@@ -682,12 +741,16 @@ if grep -E -- '(^|[[:space:]])(-target|-destroy)(=|[[:space:]])' \
 fi
 grep -F 'CONFIRM' <<<"${workload_apply_recipe}" \
   | grep -F '$(WORKLOAD_CONFIRMATION)' >/dev/null
-grep -F '$(TF) apply -input=false "$(WORKLOAD_PLAN)"' \
+grep -F '$(TF) apply -input=false "$${apply_plan}"' \
   <<<"${workload_apply_recipe}" >/dev/null
 test "$(
   grep -Fc './scripts/workload-plan-metadata.sh verify' \
     <<<"${workload_apply_recipe}"
-)" -eq 2
+)" -eq 3
+grep -F 'cp "$(WORKLOAD_PLAN)" "$${apply_plan}"' \
+  <<<"${workload_apply_recipe}" >/dev/null
+grep -F 'cmp -s "$(WORKLOAD_PLAN)" "$${apply_plan}"' \
+  <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-plan.sh' <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-quota.sh' <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-artifacts.sh' <<<"${workload_apply_recipe}" >/dev/null
@@ -698,6 +761,15 @@ grep -F '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
 grep -F -- '-detailed-exitcode' <<<"${workload_apply_recipe}" >/dev/null
 grep -F 'rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"' \
   <<<"${workload_apply_recipe}" >/dev/null
+apply_remove_line="$(
+  grep -nF 'rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"' \
+    <<<"${workload_apply_recipe}" | cut -d: -f1
+)"
+apply_final_release_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
+    <<<"${workload_apply_recipe}" | tail -1 | cut -d: -f1
+)"
+test "${apply_remove_line}" -lt "${apply_final_release_line}"
 grep -F 'override WORKLOAD_IMAGE_REVISION := $(CORE_IMAGE_REVISION)' \
   "${provider_root}/Makefile" >/dev/null
 grep -F 'CORE_IMAGE_REVISION=' "${repo_root}/.env.gcp.template" >/dev/null

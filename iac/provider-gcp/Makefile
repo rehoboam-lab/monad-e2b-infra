@@ -223,7 +223,6 @@ workload-context-guard:
 .PHONY: workload-plan workload-apply
 workload-plan:
 	@ printf '%s' "$(ENV)" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$$' || (printf "Invalid environment name: %s\n" "$(ENV)"; exit 1)
-	@ rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"
 	@ $(MAKE) workload-context-guard
 	@ $(call tf_fmt)
 	@ set -eu; \
@@ -232,8 +231,34 @@ workload-plan:
 		temp_manifest="$${temp_dir}/manifest"; \
 		before_artifacts="$${temp_dir}/artifacts-before.json"; \
 		after_artifacts="$${temp_dir}/artifacts-after.json"; \
-		trap 'rm -rf -- "$${temp_dir}"' EXIT HUP INT TERM; \
+		lease_token="$${temp_dir}/lease-token.json"; \
+		lease_acquired=false; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT HUP INT TERM; \
+			if [ "$${lease_acquired}" = true ]; then \
+				if ! "$(WORKLOAD_ROLLOUT_LEASE)" release "$(GCLOUD)" "$${lease_token}"; then \
+					printf "Shared rollout lease release failed; inspect it before another rollout.\n" >&2; \
+					if [ "$${status}" -eq 0 ]; then status=1; fi; \
+				fi; \
+			fi; \
+			rm -rf -- "$${temp_dir}"; \
+			exit "$${status}"; \
+		}; \
+		trap cleanup EXIT HUP INT TERM; \
 		umask 077; \
+		holder_digest="$$( \
+			{ \
+				git -C ../.. rev-parse --verify HEAD; \
+				printf '%s\n' "$(ENV)" "$$$$" "$$(date -u +%s)"; \
+			} | shasum -a 256 | awk '{print $$1}' \
+		)"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+			"plan:$${holder_digest}" "$${lease_token}"; \
+		lease_acquired=true; \
+		rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"; \
 		./scripts/assert-workload-artifacts.sh \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(PREFIX)" \
 			"$(WORKLOAD_IMAGE_REVISION)" "$(GCLOUD)" \
@@ -269,6 +294,8 @@ workload-plan:
 		mv -f -- "$${temp_manifest}" "$(WORKLOAD_PLAN_MANIFEST)"; \
 		mv -f -- "$${temp_plan}" "$(WORKLOAD_PLAN)"; \
 		rm -f -- "$${before_artifacts}" "$${after_artifacts}"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" release "$(GCLOUD)" "$${lease_token}"; \
+		lease_acquired=false; \
 		rmdir "$${temp_dir}"; \
 		trap - EXIT HUP INT TERM
 	@ printf "Saved one-workcell plan and provenance are ready for review: %s and %s\n" "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"
@@ -285,6 +312,8 @@ workload-apply:
 		temp_dir="$$(mktemp -d ".workload-apply.$(ENV).XXXXXX")"; \
 		before_artifacts="$${temp_dir}/artifacts-before.json"; \
 		after_artifacts="$${temp_dir}/artifacts-after.json"; \
+		apply_plan="$${temp_dir}/reviewed.plan"; \
+		apply_manifest="$${temp_dir}/reviewed.plan.manifest"; \
 		lease_token="$${temp_dir}/lease-token.json"; \
 		lease_acquired=false; \
 		cleanup() { \
@@ -320,8 +349,14 @@ workload-apply:
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
 			"workload:$${holder_digest}" "$${lease_token}"; \
 		lease_acquired=true; \
+		cp "$(WORKLOAD_PLAN)" "$${apply_plan}"; \
+		cp "$(WORKLOAD_PLAN_MANIFEST)" "$${apply_manifest}"; \
+		chmod 0600 "$${apply_plan}" "$${apply_manifest}"; \
+		$(workload_metadata_context) ./scripts/workload-plan-metadata.sh verify \
+			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
+			"$${before_artifacts}"; \
 		./scripts/assert-workload-plan.sh \
-			"$(WORKLOAD_PLAN)" "$(TF)" \
+			"$${apply_plan}" "$(TF)" \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"; \
 		./scripts/assert-workload-quota.sh \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" \
@@ -332,9 +367,9 @@ workload-apply:
 			>"$${after_artifacts}"; \
 		chmod 0600 "$${after_artifacts}"; \
 		$(workload_metadata_context) ./scripts/workload-plan-metadata.sh verify \
-			"$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)" "$(TF)" "." "../.." \
+			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
 			"$${after_artifacts}"; \
-		$(TF) apply -input=false "$(WORKLOAD_PLAN)"; \
+		$(TF) apply -input=false "$${apply_plan}"; \
 		set +e; \
 		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
 			-out="$${temp_dir}/post-apply.plan" \
@@ -346,12 +381,17 @@ workload-apply:
 		set -e; \
 		if [ "$${post_apply_status}" -ne 0 ]; then \
 			printf "Post-apply convergence check was not clean (Terraform exit %s).\n" \
-				"$${post_apply_status}" >&2; \
+					"$${post_apply_status}" >&2; \
 			exit 1; \
 		fi; \
+		if ! cmp -s "$(WORKLOAD_PLAN)" "$${apply_plan}" \
+			|| ! cmp -s "$(WORKLOAD_PLAN_MANIFEST)" "$${apply_manifest}"; then \
+			printf "Applied reviewed bytes, but the published plan changed concurrently; preserving the replacement.\n" >&2; \
+			exit 1; \
+		fi; \
+		rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"; \
 		"$(WORKLOAD_ROLLOUT_LEASE)" release "$(GCLOUD)" "$${lease_token}"; \
 		lease_acquired=false; \
-		rm -f -- "$(WORKLOAD_PLAN)" "$(WORKLOAD_PLAN_MANIFEST)"; \
 		rm -rf -- "$${temp_dir}"; \
 		trap - EXIT HUP INT TERM
 
