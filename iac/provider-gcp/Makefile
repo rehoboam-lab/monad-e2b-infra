@@ -106,12 +106,21 @@ init:
 
 FOUNDATION_PLAN := .tfplan.foundation.$(ENV)
 FOUNDATION_DESTROY_PLAN := .tfplan.foundation-destroy.$(ENV)
+WORKLOAD_PLAN ?= .tfplan.$(ENV)
+WORKLOAD_TOPOLOGY_POLICY ?= topology/minimal-workload-policy.json
 override FOUNDATION_CONFIRMATION := APPLY KEYLESS FOUNDATION
 
 .PHONY: runtime-blocked
 runtime-blocked:
 	@ printf "Refusing workload Terraform in the F1.0 foundation branch. Only foundation-init, foundation-plan, and confirmed foundation-apply are supported.\n"
 	@ exit 1
+
+.PHONY: workload-plan-check workload-plan-assertions-test
+workload-plan-check:
+	@ ./scripts/assert-workload-plan.sh "$(WORKLOAD_PLAN)" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)"
+
+workload-plan-assertions-test:
+	@ ./scripts/test-workload-plan-assertions.sh
 
 .PHONY: foundation-config-guard
 foundation-config-guard:

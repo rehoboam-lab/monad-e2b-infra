@@ -1,0 +1,13 @@
+{
+  "expected_role_max_instances": {
+    "api": 1,
+    "build": 1,
+    "clickhouse": 1,
+    "client": 2,
+    "loki": 0,
+    "server": 3
+  },
+  "max_worker_surge_per_pool": 3,
+  "planning_instance_quota": 24,
+  "required_instance_headroom": 6
+}
