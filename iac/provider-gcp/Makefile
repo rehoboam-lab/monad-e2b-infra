@@ -132,6 +132,7 @@ workload-plan-check:
 
 workload-plan-assertions-test:
 	@ ./scripts/test-workload-plan-assertions.sh
+	@ ./scripts/test-legacy-workload-mutation-disabled.sh
 
 packer-reserve-check:
 	@ ./scripts/assert-packer-reserve.sh "$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"
@@ -324,15 +325,14 @@ switch:
 	@ exit 1
 
 .PHONY: destroy
-destroy: foundation-config-guard foundation-toolchain-guard keyless-runtime-check acl-token-state-guard
-	@ printf "Destroying Terraform for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
-	@ $(tf_vars) $(TF) destroy $(TF_VAR_FILE_ARG)
+destroy:
+	@ printf "Refusing legacy workload destroy. No reviewed workload destroy/apply workflow exists yet.\n"
+	@ exit 1
 
 .PHONY: plan
-plan: foundation-config-guard foundation-toolchain-guard keyless-runtime-check acl-token-state-guard
-	@ printf "Planning Terraform for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
-	@ $(call tf_fmt)
-	@ $(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) -out=.tfplan.$(ENV) -compact-warnings
+plan:
+	@ printf "Refusing legacy workload plan. Use the reviewed workload release workflow once it lands.\n"
+	@ exit 1
 
 .PHONY: terraform
 terraform: foundation-toolchain-guard keyless-runtime-check acl-token-state-guard
@@ -385,15 +385,9 @@ plan-without-jobs: foundation-config-guard foundation-toolchain-guard keyless-ru
 	$(TARGET)
 
 .PHONY: apply
-apply: foundation-config-guard foundation-toolchain-guard keyless-runtime-check acl-token-state-guard
-	@ printf "Applying Terraform for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
-	@ $(TF) apply \
-	-auto-approve \
-	-input=false \
-	-compact-warnings \
-	-parallelism=20 \
-	.tfplan.$(ENV)
-	@ rm .tfplan.$(ENV)
+apply:
+	@ printf "Refusing legacy workload apply. Apply requires a reviewed saved plan, provenance, topology check, and exact confirmation.\n"
+	@ exit 1
 
 # Shortcut to importing resources into Terraform state (e.g. after creating resources manually or switching between different branches for the same environment)
 .PHONY: import

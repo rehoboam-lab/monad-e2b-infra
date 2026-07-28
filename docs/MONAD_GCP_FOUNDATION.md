@@ -111,6 +111,12 @@ The supported foundation workflow still refuses existing state outside
 any destructive plan. A later patch should split foundation and workload into
 separate Terraform roots/states, removing the need for `-target`.
 
+The legacy `make plan`, `make apply`, and `make destroy` workload targets are
+disabled. The topology policy and its tests do not by themselves authorize a
+deployment. Workload mutation remains unavailable until a saved-plan workflow
+binds the reviewed source, environment, backend, quota policy, and plan bytes,
+reruns the topology check, and requires an exact apply confirmation.
+
 ## Workload topology safety (not yet enabled)
 
 The first full workload plan remains blocked until the keyless runtime
