@@ -267,6 +267,23 @@ def reserve_usage($reserve):
     regional_public_ips: $reserve.regional_public_ips
   };
 
+def expected_cloud_sql_address($resource; $policy):
+  ($policy.resource_addresses | index($resource.address)) != null;
+
+def is_cloud_sql_resource($resource; $policy):
+  expected_cloud_sql_address($resource; $policy)
+  or $resource.type == "google_sql_database_instance"
+  or $resource.type == "google_sql_database"
+  or $resource.type == "google_sql_user"
+  or $resource.type == "google_service_networking_connection"
+  or (
+    $resource.type == "google_compute_global_address"
+    and (
+      ($resource.change.after.purpose // null) == "VPC_PEERING"
+      or ($resource.change.before.purpose // null) == "VPC_PEERING"
+    )
+  );
+
 managed_changes as $changes
 | (
     [
@@ -471,6 +488,58 @@ managed_changes as $changes
     reserve_usage($expected.transient_reserve)
   ) as $packer_usage
 | max_usage($rollout_usage; $packer_usage) as $peak_usage
+| (
+    [
+      $changes[] as $resource
+      | select(
+          is_cloud_sql_resource(
+            $resource;
+            $expected.expected_cloud_sql
+          )
+        )
+      | $resource
+    ]
+  ) as $cloud_sql_resources
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_sql_database_instance.operator_canary"))
+    | first
+  ) as $cloud_sql_instance
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_compute_global_address.cloud_sql_private_services"))
+    | first
+  ) as $cloud_sql_private_services_range
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_service_networking_connection.cloud_sql"))
+    | first
+  ) as $cloud_sql_private_services_connection
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_project_service_identity.cloud_sql"))
+    | first
+  ) as $cloud_sql_service_identity
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_project_service_identity.service_networking"))
+    | first
+  ) as $service_networking_service_identity
+| (
+    $cloud_sql_resources
+    | map(select(.address == "random_password.cloud_sql_operator_canary"))
+    | first
+  ) as $cloud_sql_password
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_sql_database.operator_canary"))
+    | first
+  ) as $cloud_sql_database
+| (
+    $cloud_sql_resources
+    | map(select(.address == "google_sql_user.operator_canary"))
+    | first
+  ) as $cloud_sql_user
 | {
     role_max_instances: $role_max_instances,
     role_surge_instances: $role_surge_instances,
@@ -636,6 +705,542 @@ managed_changes as $changes
           disks: .invalid_disks
         }
     ],
+    destructive_cloud_sql_resources: [
+      $cloud_sql_resources[]
+      | select(.change.actions | index("delete"))
+      | .address
+    ],
+    unknown_cloud_sql_resources: [
+      $cloud_sql_resources[] as $resource
+      | select(
+          expected_cloud_sql_address(
+            $resource;
+            $expected.expected_cloud_sql
+          )
+          | not
+        )
+      | {
+          address: $resource.address,
+          type: $resource.type
+        }
+    ],
+    missing_or_duplicate_cloud_sql_resources: [
+      $expected.expected_cloud_sql.resource_addresses[] as $address
+      | (
+          [
+            $cloud_sql_resources[]
+            | select(.address == $address)
+          ]
+          | length
+        ) as $count
+      | select($count != 1)
+      | {
+          address: $address,
+          count: $count
+        }
+    ],
+    invalid_cloud_sql_resources: (
+      [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_sql_database_instance.operator_canary"
+          )
+        | . as $resource
+        | ($resource.change.after.settings[0] // {}) as $settings
+        | (
+            $settings.backup_configuration[0]
+            // {}
+          ) as $backup
+        | (
+            $backup.backup_retention_settings[0]
+            // {}
+          ) as $retention
+        | (
+            $settings.ip_configuration[0]
+            // {}
+          ) as $ip
+        | select(
+            $resource.change.after.database_version
+              != $expected.expected_cloud_sql.database_version
+            or (
+              $resource.change.after.name
+              | type
+            ) != "string"
+            or (
+              try (
+                $resource.change.after.name
+                | endswith($expected.expected_cloud_sql.instance_name_suffix)
+              ) catch false
+              | not
+            )
+            or (
+              $resource.change.after.project
+              | type
+            ) != "string"
+            or (
+              $resource.change.after.project
+              | length
+            ) == 0
+            or (
+              $resource.change.after.region
+              | type
+            ) != "string"
+            or (
+              $resource.change.after.region
+              | length
+            ) == 0
+            or $resource.change.after.deletion_protection != true
+            or $settings.tier
+              != $expected.expected_cloud_sql.tier
+            or $settings.edition
+              != $expected.expected_cloud_sql.edition
+            or $settings.availability_type
+              != $expected.expected_cloud_sql.availability_type
+            or $settings.disk_type
+              != $expected.expected_cloud_sql.disk_type
+            or $settings.disk_size
+              != $expected.expected_cloud_sql.disk_size_gb
+            or $settings.disk_autoresize != true
+            or $settings.disk_autoresize_limit
+              != $expected.expected_cloud_sql.disk_autoresize_limit_gb
+            or $settings.deletion_protection_enabled != true
+            or $backup.enabled != true
+            or $backup.location != $resource.change.after.region
+            or $backup.start_time
+              != $expected.expected_cloud_sql.backup_start_time
+            or $backup.point_in_time_recovery_enabled != true
+            or $backup.transaction_log_retention_days
+              != $expected.expected_cloud_sql.transaction_log_retention_days
+            or $retention.retained_backups
+              != $expected.expected_cloud_sql.retained_backups
+            or $retention.retention_unit != "COUNT"
+            or $ip.ipv4_enabled != false
+            or (
+              $ip.private_network
+              | type
+            ) != "string"
+            or (
+              $ip.private_network
+              | length
+            ) == 0
+            or $ip.private_network
+              != $cloud_sql_private_services_range.change.after.network
+            or $ip.private_network
+              != $cloud_sql_private_services_connection.change.after.network
+            or (
+              $ip.allocated_ip_range
+              | type
+            ) != "string"
+            or (
+              $ip.allocated_ip_range
+              | length
+            ) == 0
+            or $ip.allocated_ip_range
+              != $cloud_sql_private_services_range.change.after.name
+            or $ip.allocated_ip_range
+              != $cloud_sql_private_services_connection.change.after.reserved_peering_ranges[0]
+            or $ip.enable_private_path_for_google_cloud_services != false
+            or $ip.ssl_mode != $expected.expected_cloud_sql.ssl_mode
+          )
+        | {
+            address: $resource.address,
+            reason: "instance-settings"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_compute_global_address.cloud_sql_private_services"
+          )
+        | select(
+            .change.after.purpose != "VPC_PEERING"
+            or .change.after.address_type != "INTERNAL"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or (
+              .change.after.name
+              | type
+            ) != "string"
+            or (
+              .change.after.name
+              | length
+            ) == 0
+            or .change.after.prefix_length
+              != $expected.expected_cloud_sql.private_services_prefix_length
+            or (
+              .change.after.network
+              | type
+            ) != "string"
+            or (
+              .change.after.network
+              | length
+            ) == 0
+            or .change.after.network
+              != $cloud_sql_instance.change.after.settings[0].ip_configuration[0].private_network
+            or .change.after.network
+              != $cloud_sql_private_services_connection.change.after.network
+          )
+        | {
+            address: .address,
+            reason: "private-services-range"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_service_networking_connection.cloud_sql"
+          )
+        | select(
+            .change.after.service != "servicenetworking.googleapis.com"
+            or .change.after.deletion_policy != "ABANDON"
+            or (
+              .change.after.network
+              | type
+            ) != "string"
+            or (
+              .change.after.network
+              | length
+            ) == 0
+            or .change.after.network
+              != $cloud_sql_private_services_range.change.after.network
+            or .change.after.network
+              != $cloud_sql_instance.change.after.settings[0].ip_configuration[0].private_network
+            or (
+              .change.after.reserved_peering_ranges
+              | type
+            ) != "array"
+            or (
+              .change.after.reserved_peering_ranges
+              | length
+            ) != 1
+            or .change.after.reserved_peering_ranges[0]
+              != $cloud_sql_private_services_range.change.after.name
+            or .change.after.reserved_peering_ranges[0]
+              != $cloud_sql_instance.change.after.settings[0].ip_configuration[0].allocated_ip_range
+          )
+        | {
+            address: .address,
+            reason: "private-services-connection"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_sql_database.operator_canary"
+          )
+        | select(
+            .change.after.name
+              != $expected.expected_cloud_sql.database_name
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or (
+              .change.after.instance
+              | type
+            ) != "string"
+            or (
+              .change.after.instance
+              | length
+            ) == 0
+            or .change.after.instance != $cloud_sql_instance.change.after.name
+          )
+        | {
+            address: .address,
+            reason: "database"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_sql_user.operator_canary"
+          )
+        | select(
+            .change.after.name
+              != $expected.expected_cloud_sql.user_name
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or (
+              .change.after.instance
+              | type
+            ) != "string"
+            or (
+              .change.after.instance
+              | length
+            ) == 0
+            or .change.after.instance != $cloud_sql_instance.change.after.name
+            or .change.after_sensitive.password != true
+            or (
+              if (
+                (.change.after.password | type) == "string"
+                and ($cloud_sql_password.change.after.result | type) == "string"
+              ) then
+                .change.after.password != $cloud_sql_password.change.after.result
+              elif (
+                .change.after.password == null
+                and $cloud_sql_password.change.after.result == null
+              ) then
+                .change.after_unknown.password != true
+                  or $cloud_sql_password.change.after_unknown.result != true
+              else
+                true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "database-user"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "random_password.cloud_sql_operator_canary"
+          )
+        | select(
+            .change.after.length != 32
+            or .change.after.special != false
+            or .change.after_sensitive.result != true
+            or (
+              if (.change.after.result | type) == "string" then
+                false
+              else
+                .change.after.result != null
+                  or .change.after_unknown.result != true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "database-password-policy"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "google_secret_manager_secret_version.postgres_connection_string"
+          )
+        | (
+            $cloud_sql_instance.change.after.name
+            | rtrimstr($expected.expected_cloud_sql.instance_name_suffix)
+          ) as $prefix
+        | select(
+            .change.after.secret
+              != (
+                "projects/"
+                + $cloud_sql_instance.change.after.project
+                + "/secrets/"
+                + $prefix
+                + $expected.expected_cloud_sql.connection_secret_id_suffix
+              )
+            or .change.after_sensitive.secret_data != true
+            or (
+              if (.change.after.secret_data | type) == "string" then
+                if (
+                  ($cloud_sql_user.change.after.name | type) == "string"
+                  and ($cloud_sql_password.change.after.result | type) == "string"
+                  and (
+                    $cloud_sql_instance.change.after.private_ip_address
+                    | type
+                  ) == "string"
+                  and ($cloud_sql_database.change.after.name | type) == "string"
+                ) then
+                  .change.after.secret_data
+                    != (
+                      "postgresql://"
+                      + $cloud_sql_user.change.after.name
+                      + ":"
+                      + $cloud_sql_password.change.after.result
+                      + "@"
+                      + $cloud_sql_instance.change.after.private_ip_address
+                      + ":5432/"
+                      + $cloud_sql_database.change.after.name
+                      + "?sslmode=require"
+                    )
+                else
+                  true
+                end
+              else
+                .change.after.secret_data != null
+                  or .change.after_unknown.secret_data != true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "connection-secret"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(
+            .address
+            == "terraform_data.cloud_sql_connection_budget"
+          )
+        | (.change.after.input // {}) as $input
+        | select(
+            ($input.db_max_open_connections | type) != "number"
+            or $input.db_max_open_connections < 1
+            or (
+              $input.db_max_open_connections
+              | floor
+            ) != $input.db_max_open_connections
+            or ($input.auth_db_max_open_connections | type) != "number"
+            or $input.auth_db_max_open_connections < 1
+            or (
+              $input.auth_db_max_open_connections
+              | floor
+            ) != $input.auth_db_max_open_connections
+            or ($input.db_min_idle_connections | type) != "number"
+            or $input.db_min_idle_connections < 0
+            or (
+              $input.db_min_idle_connections
+              | floor
+            ) != $input.db_min_idle_connections
+            or $input.db_min_idle_connections
+              > $input.db_max_open_connections
+            or ($input.auth_db_min_idle_connections | type) != "number"
+            or $input.auth_db_min_idle_connections < 0
+            or (
+              $input.auth_db_min_idle_connections
+              | floor
+            ) != $input.auth_db_min_idle_connections
+            or $input.auth_db_min_idle_connections
+              > $input.auth_db_max_open_connections
+            or $input.api_server_count
+              != $expected.expected_cloud_sql.api_server_count
+            or $input.dashboard_api_count
+              != $expected.expected_cloud_sql.dashboard_api_count
+            or $input.migrator_max_open_connections
+              != $expected.expected_cloud_sql.migrator_max_open_connections
+            or $input.docker_reverse_proxy_max_open_connections
+              != $expected.expected_cloud_sql.docker_reverse_proxy_max_open_connections
+            or $input.dashboard_api_max_open_connections_per_instance
+              != $expected.expected_cloud_sql.dashboard_api_max_open_connections_per_instance
+            or $input.maximum_concurrent_connections
+              != (
+                (
+                  $input.db_max_open_connections
+                  + $input.auth_db_max_open_connections
+                )
+                * $input.api_server_count
+                + (
+                  $input.dashboard_api_max_open_connections_per_instance
+                  * $input.dashboard_api_count
+                )
+                + $input.docker_reverse_proxy_max_open_connections
+                + $input.migrator_max_open_connections
+              )
+            or $input.maximum_concurrent_connections
+              > $expected.expected_cloud_sql.application_connection_budget
+          )
+        | {
+            address: .address,
+            reason: "application-connection-budget"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_service.cloud_sql_admin_api")
+        | select(
+            .change.after.service != "sqladmin.googleapis.com"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or .change.after.disable_on_destroy != false
+          )
+        | {
+            address: .address,
+            reason: "cloud-sql-api"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_service.service_networking_api")
+        | select(
+            .change.after.service != "servicenetworking.googleapis.com"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or .change.after.disable_on_destroy != false
+          )
+        | {
+            address: .address,
+            reason: "service-networking-api"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_service_identity.cloud_sql")
+        | select(
+            .change.after.service != "sqladmin.googleapis.com"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+          )
+        | {
+            address: .address,
+            reason: "cloud-sql-service-identity"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_service_identity.service_networking")
+        | select(
+            .change.after.service != "servicenetworking.googleapis.com"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+          )
+        | {
+            address: .address,
+            reason: "service-networking-identity"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_iam_member.cloud_sql_service_agent")
+        | select(
+            .change.after.role != "roles/cloudsql.serviceAgent"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or (
+              if (
+                (.change.after.member | type) == "string"
+                and ($cloud_sql_service_identity.change.after.email | type) == "string"
+              ) then
+                .change.after.member
+                  != ("serviceAccount:" + $cloud_sql_service_identity.change.after.email)
+              else
+                .change.after_unknown.member != true
+                  or $cloud_sql_service_identity.change.after_unknown.email != true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "cloud-sql-service-agent-role"
+          }
+      ]
+      + [
+        $cloud_sql_resources[]
+        | select(.address == "google_project_iam_member.service_networking_service_agent")
+        | select(
+            .change.after.role
+            != "roles/servicenetworking.serviceAgent"
+            or .change.after.project != $cloud_sql_instance.change.after.project
+            or (
+              if (
+                (.change.after.member | type) == "string"
+                and ($service_networking_service_identity.change.after.email | type) == "string"
+              ) then
+                .change.after.member
+                  != ("serviceAccount:" + $service_networking_service_identity.change.after.email)
+              else
+                .change.after_unknown.member != true
+                  or $service_networking_service_identity.change.after_unknown.email != true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "service-networking-service-agent-role"
+          }
+      ]
+    ),
     quota_violations: [
       $expected.quota_limits
       | keys[] as $quota

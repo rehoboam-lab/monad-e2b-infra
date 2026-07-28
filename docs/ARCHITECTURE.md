@@ -373,8 +373,21 @@ flowchart TB
   drain orchestration is not implemented, and Packer image builds must not overlap a rollout.
 - **ClickHouse nodes** have an explicit MIG target size equal to the configured ClickHouse cluster
   size so the instance count cannot silently remain at the provider default.
-- PostgreSQL is external (connection string via secrets); Redis runs as a Nomad job or as a
-  managed service; ClickHouse runs on its own pool.
+- The Monad dev operator canary provisions a dedicated Cloud SQL for PostgreSQL 16 instance in
+  the workload region. It has only a private IPv4 address reached through Private Services Access
+  on the existing workload VPC. Cloud SQL rejects unencrypted connections, and Terraform publishes
+  the generated dedicated database/user URI with `sslmode=require` directly into the existing
+  `postgres-connection-string` Secret Manager container. The shared-core `db-f1-micro` tier is a
+  low-cost, zonal, no-SLA development choice for the one-workcell canary, not beta capacity.
+  Its reviewed client ceiling is one API allocation with six primary and three auth connections,
+  six fixed docker-reverse-proxy connections, four migrator connections, and no dashboard API:
+  19 configured connections in aggregate.
+  Automated backups, seven-day PITR, bounded disk auto-growth, and both Terraform and GCP deletion
+  protection are enabled. The private service connection is abandoned rather than automatically
+  deleted during teardown, and Terraform prevents destruction of its allocated range. Both remain
+  until an operator proves that no other managed service uses the peering and performs a separately
+  reviewed teardown after Cloud SQL producer cleanup. Redis runs as a Nomad job or as a managed
+  service; ClickHouse runs on its own pool.
 - The Monad fork contains no Google service-account-key resources.
   Its F1.0 path may apply only the `module.init` foundation. A full workload
   plan is deliberately blocked until every API, build, sandbox, registry, and

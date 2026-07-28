@@ -61,12 +61,55 @@ reviewed_reserve="$(
     regional_public_ips: 1
   }'
 )"
+reviewed_cloud_sql="$(
+  jq -cn '{
+    resource_addresses: [
+      "google_compute_global_address.cloud_sql_private_services",
+      "google_project_iam_member.cloud_sql_service_agent",
+      "google_project_iam_member.service_networking_service_agent",
+      "google_project_service.cloud_sql_admin_api",
+      "google_project_service.service_networking_api",
+      "google_project_service_identity.cloud_sql",
+      "google_project_service_identity.service_networking",
+      "google_secret_manager_secret_version.postgres_connection_string",
+      "google_service_networking_connection.cloud_sql",
+      "google_sql_database.operator_canary",
+      "google_sql_database_instance.operator_canary",
+      "google_sql_user.operator_canary",
+      "random_password.cloud_sql_operator_canary",
+      "terraform_data.cloud_sql_connection_budget"
+    ],
+    instance_name_suffix: "postgres-canary",
+    connection_secret_id_suffix: "postgres-connection-string",
+    database_version: "POSTGRES_16",
+    tier: "db-f1-micro",
+    edition: "ENTERPRISE",
+    availability_type: "ZONAL",
+    disk_type: "PD_HDD",
+    disk_size_gb: 10,
+    disk_autoresize_limit_gb: 20,
+    private_services_prefix_length: 24,
+    ssl_mode: "ENCRYPTED_ONLY",
+    backup_start_time: "03:00",
+    retained_backups: 7,
+    transaction_log_retention_days: 7,
+    database_name: "e2b",
+    user_name: "e2b",
+    application_connection_budget: 19,
+    migrator_max_open_connections: 4,
+    docker_reverse_proxy_max_open_connections: 6,
+    dashboard_api_max_open_connections_per_instance: 16,
+    api_server_count: 1,
+    dashboard_api_count: 0
+  }'
+)"
 policy_json="$(jq -c . "${policy_path}")"
 
 jq -e \
   --argjson reviewed_quota_limits "${reviewed_quota_limits}" \
   --argjson reviewed_peak_usage "${reviewed_peak_usage}" \
-  --argjson reviewed_reserve "${reviewed_reserve}" '
+  --argjson reviewed_reserve "${reviewed_reserve}" \
+  --argjson reviewed_cloud_sql "${reviewed_cloud_sql}" '
   def machine_vcpus($machine_type):
     try (
       $machine_type
@@ -137,6 +180,7 @@ jq -e \
   and .transient_scenarios_are_mutually_exclusive == true
   and .expected_peak_usage == $reviewed_peak_usage
   and (.expected_peak_usage | quota_usage_shape)
+  and .expected_cloud_sql == $reviewed_cloud_sql
   and .quota_limits == $reviewed_quota_limits
   and (.quota_limits | quota_usage_shape)
   and (
@@ -186,6 +230,10 @@ failure_fields=(
   automated_worker_server_surges
   unresolved_templates
   invalid_template_disks
+  destructive_cloud_sql_resources
+  unknown_cloud_sql_resources
+  missing_or_duplicate_cloud_sql_resources
+  invalid_cloud_sql_resources
   quota_violations
 )
 
