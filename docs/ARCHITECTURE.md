@@ -365,6 +365,12 @@ flowchart TB
   template caches. Autoscaled.
 - **Build nodes** run the same binary in template-manager mode; the `nomad-nodepool-apm`
   autoscaler plugin scales the job with the node pool.
+- **Worker rollouts** cap each default three-zone regional MIG at three surge instances. That
+  bounds quota exposure but does not drain workloads: before replacing a worker template, the
+  operator must pause/snapshot active sandboxes, verify durable uploads, stop placement, drain
+  Nomad allocations, and verify MIG stability. Automated drain orchestration is not implemented.
+- **ClickHouse nodes** have an explicit MIG target size equal to the configured ClickHouse cluster
+  size so the instance count cannot silently remain at the provider default.
 - PostgreSQL is external (connection string via secrets); Redis runs as a Nomad job or as a
   managed service; ClickHouse runs on its own pool.
 - The Monad fork contains no Google service-account-key resources or internal

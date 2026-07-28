@@ -106,6 +106,39 @@ The supported foundation workflow still refuses existing state outside
 any destructive plan. A later patch should split foundation and workload into
 separate Terraform roots/states, removing the need for `-target`.
 
+## Workload topology safety (not yet enabled)
+
+The first full workload plan remains blocked until the keyless runtime
+credential migration is complete. When that gate is removed, save the plan and
+inspect its complete topology before apply:
+
+```bash
+make -C iac/provider-gcp workload-plan-check \
+  WORKLOAD_PLAN=.tfplan.dev
+```
+
+The checked-in minimal-workload policy expects these maximum role counts:
+three Nomad/Consul servers, one API node, one ClickHouse node, one build node,
+up to two sandbox client nodes, and no Loki node. The worker regional MIGs use
+the GCP default three-zone distribution. Their fixed rollout surge is capped
+at three—the minimum valid non-zero fixed value for a default regional MIG
+according to [Google's regional MIG update rules](https://cloud.google.com/compute/docs/instance-groups/rolling-out-updates-to-managed-instance-groups#updating_a_regional_managed_instance_group).
+
+The plan guard derives autoscaler maxima, fixed role sizes, and every MIG's
+rollout surge from `terraform show -json`. For the minimal policy it permits
+eight maximum steady-state instances plus ten rollout instances, for a peak of
+18. The policy's 24-instance planning assumption therefore reserves six
+instances of headroom. This is not live quota evidence: immediately before
+apply, re-check the selected region's instance, CPU, SSD, local SSD, address,
+and relevant per-machine-family quotas. Increase the policy only through a
+reviewed change supported by updated cost and capacity evidence.
+
+The capacity limit does not make worker replacement safe. Snapshot or pause
+every active sandbox, wait for snapshot uploads to become durable, stop new
+placement on the affected Nomad nodes, drain allocations, and verify the MIG
+is stable before replacing a worker template. That orchestration is not yet
+implemented, so any workload rollout remains an operator-blocked procedure.
+
 After the foundation apply, add the first secret versions directly over stdin
 so values never enter shell history. Replace `<prefix>` with the configured
 prefix (the template default is `e2b-`), paste one value, then send EOF:

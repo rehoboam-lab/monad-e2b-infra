@@ -110,6 +110,8 @@ init:
 FOUNDATION_PLAN := .tfplan.foundation.$(ENV)
 FOUNDATION_PLAN_MANIFEST := $(FOUNDATION_PLAN).manifest
 FOUNDATION_DESTROY_PLAN := .tfplan.foundation-destroy.$(ENV)
+WORKLOAD_PLAN ?= .tfplan.$(ENV)
+WORKLOAD_TOPOLOGY_POLICY ?= topology/minimal-workload-policy.json
 override FOUNDATION_CONFIRMATION := APPLY KEYLESS FOUNDATION
 override ACL_STATE_SCRUB_CONFIRMATION := FORGET LEAKING ACL TOKEN GENERATORS
 
@@ -122,6 +124,13 @@ FOUNDATION_GCP_REGION="$(GCP_REGION)" \
 FOUNDATION_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
 FOUNDATION_STATE_PREFIX="$(TERRAFORM_STATE_PREFIX)"
 endef
+
+.PHONY: workload-plan-check workload-plan-assertions-test
+workload-plan-check:
+	@ ./scripts/assert-workload-plan.sh "$(WORKLOAD_PLAN)" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)"
+
+workload-plan-assertions-test:
+	@ ./scripts/test-workload-plan-assertions.sh
 
 .PHONY: foundation-config-guard
 foundation-config-guard:

@@ -1,0 +1,135 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.15.8",
+  "applyable": true,
+  "complete": true,
+  "errored": false,
+  "resource_changes": [
+    {
+      "address": "module.cluster.google_compute_region_instance_group_manager.server_pool",
+      "mode": "managed",
+      "type": "google_compute_region_instance_group_manager",
+      "name": "server_pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": 3,
+          "update_policy": [
+            {
+              "max_surge_fixed": 3,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_group_manager.api_pool",
+      "mode": "managed",
+      "type": "google_compute_instance_group_manager",
+      "name": "api_pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": 1,
+          "update_policy": [
+            {
+              "max_surge_fixed": 1,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_group_manager.clickhouse_pool",
+      "mode": "managed",
+      "type": "google_compute_instance_group_manager",
+      "name": "clickhouse_pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": 1,
+          "update_policy": [
+            {
+              "max_surge_fixed": 0,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.google_compute_instance_group_manager.loki_pool",
+      "mode": "managed",
+      "type": "google_compute_instance_group_manager",
+      "name": "loki_pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": 0,
+          "update_policy": [
+            {
+              "max_surge_fixed": 1,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.module.build_cluster[\"default\"].google_compute_region_instance_group_manager.pool",
+      "mode": "managed",
+      "type": "google_compute_region_instance_group_manager",
+      "name": "pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": 1,
+          "update_policy": [
+            {
+              "max_surge_fixed": 3,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.module.client_cluster[\"default\"].google_compute_region_instance_group_manager.pool",
+      "mode": "managed",
+      "type": "google_compute_region_instance_group_manager",
+      "name": "pool",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "target_size": null,
+          "update_policy": [
+            {
+              "max_surge_fixed": 3,
+              "max_surge_percent": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "module.cluster.module.client_cluster[\"default\"].google_compute_region_autoscaler.autoscaler[0]",
+      "mode": "managed",
+      "type": "google_compute_region_autoscaler",
+      "name": "autoscaler",
+      "index": 0,
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "autoscaling_policy": [
+            {
+              "max_replicas": 2,
+              "min_replicas": 1
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

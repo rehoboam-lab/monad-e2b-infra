@@ -125,9 +125,12 @@ resource "google_compute_region_instance_group_manager" "pool" {
   # Server is a stateful cluster, so the update strategy used to roll out a new GCE Instance Template must be
   # a rolling update.
   update_policy {
-    type                         = var.environment == "dev" ? "PROACTIVE" : "OPPORTUNISTIC"
-    minimal_action               = "REPLACE"
-    max_surge_fixed              = 10
+    type           = var.environment == "dev" ? "PROACTIVE" : "OPPORTUNISTIC"
+    minimal_action = "REPLACE"
+    # Regional MIGs use three zones by default. GCP requires a fixed surge to
+    # be either zero or at least the number of zones, so three is the minimum
+    # valid bounded surge for this topology.
+    max_surge_fixed              = 3
     max_surge_percent            = null
     max_unavailable_fixed        = 5
     max_unavailable_percent      = null
