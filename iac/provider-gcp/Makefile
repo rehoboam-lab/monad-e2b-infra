@@ -6,8 +6,8 @@ ENV_FILE := ../../.env.${ENV}
 TF := $(shell which terraform)
 GCLOUD := $(shell which gcloud)
 override EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../.tool-versions)
-TF_VAR_FILE := ./.terraform.${ENV}.tfvars
-TF_VAR_FILE_ARG := $(if $(wildcard $(TF_VAR_FILE)),-var-file=$(TF_VAR_FILE))
+override TF_VAR_FILE := ./.terraform.${ENV}.tfvars
+override TF_VAR_FILE_ARG := $(if $(wildcard $(TF_VAR_FILE)),-var-file=$(TF_VAR_FILE))
 TERRAFORM_STATE_BUCKET ?= $(GCP_PROJECT_ID)-terraform-state
 override TERRAFORM_STATE_PREFIX := terraform/orchestration/$(ENV)/state
 TEMPLATE_BUCKET_LOCATION ?= $(GCP_REGION)
@@ -132,10 +132,12 @@ foundation-config-guard:
 	@ test "$(ENV)" != "not-set" || (printf "No environment selected. Run 'make set-env ENV=dev' from the repository root.\n"; exit 1)
 	@ printf '%s' "$(ENV)" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$$' || (printf "Invalid environment name: %s\n" "$(ENV)"; exit 1)
 	@ test -f "$(ENV_FILE)" || (printf "Missing environment file $(ENV_FILE).\n"; exit 1)
+	@ test -n "$(TERRAFORM_ENVIRONMENT)" && test "$(TERRAFORM_ENVIRONMENT)" = "$(ENV)" || (printf "TERRAFORM_ENVIRONMENT must exactly match the selected environment %s; found %s.\n" "$(ENV)" "$(TERRAFORM_ENVIRONMENT)"; exit 1)
 	@ test -n "$(GCP_PROJECT_ID)" || (printf "GCP_PROJECT_ID is required.\n"; exit 1)
 	@ test -n "$(GCP_REGION)" || (printf "GCP_REGION is required.\n"; exit 1)
 	@ test -n "$(TERRAFORM_STATE_BUCKET)" && test "$(TERRAFORM_STATE_BUCKET)" != "-terraform-state" || (printf "A valid TERRAFORM_STATE_BUCKET is required.\n"; exit 1)
 	@ test -n "$(TERRAFORM_STATE_PREFIX)" || (printf "A valid TERRAFORM_STATE_PREFIX is required.\n"; exit 1)
+	@ ./scripts/assert-foundation-var-sources.sh "." "$(TF_VAR_FILE)"
 
 .PHONY: foundation-toolchain-guard
 foundation-toolchain-guard:
@@ -159,6 +161,7 @@ foundation-init: foundation-config-guard foundation-toolchain-guard
 		-backend-config=bucket="$(TERRAFORM_STATE_BUCKET)" \
 		-backend-config=prefix="$(TERRAFORM_STATE_PREFIX)"
 	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
+	@ ./scripts/assert-foundation-workspace.sh "$(TF)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 
 .PHONY: foundation-plan
@@ -168,6 +171,12 @@ foundation-plan:
 	@ $(MAKE) foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning keyless foundation only for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
 	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
+	@ ./scripts/assert-foundation-state-bucket.sh \
+		"$(TERRAFORM_STATE_BUCKET)" \
+		"$(GCP_PROJECT_ID)" \
+		"$(GCP_REGION)" \
+		"$(GCLOUD)"
+	@ ./scripts/assert-foundation-workspace.sh "$(TF)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ $(call tf_fmt)
 	@ set -eu; \
@@ -189,7 +198,9 @@ foundation-plan:
 			printf "Refusing foundation plan: configuration changed while Terraform was planning.\n" >&2; \
 			exit 1; \
 		fi; \
-		./scripts/assert-foundation-plan.sh "$${temp_plan}" "$(TF)" apply; \
+		./scripts/assert-foundation-plan.sh \
+			"$${temp_plan}" "$(TF)" apply \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(ENV)"; \
 		$(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh write \
 			"$${temp_plan}" "$${temp_manifest}" "$(TF)" "." "../.." "$${after_fingerprint}"; \
 		mv -f -- "$${temp_plan}" "$(FOUNDATION_PLAN)"; \
@@ -206,10 +217,18 @@ foundation-apply: foundation-config-guard foundation-toolchain-guard
 	@ test -f $(FOUNDATION_PLAN) || (printf "Missing reviewed plan $(FOUNDATION_PLAN). Run 'make foundation-plan' first.\n"; exit 1)
 	@ test -f $(FOUNDATION_PLAN_MANIFEST) || (printf "Missing plan provenance $(FOUNDATION_PLAN_MANIFEST). Run 'make foundation-plan' first.\n"; exit 1)
 	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
+	@ ./scripts/assert-foundation-state-bucket.sh \
+		"$(TERRAFORM_STATE_BUCKET)" \
+		"$(GCP_PROJECT_ID)" \
+		"$(GCP_REGION)" \
+		"$(GCLOUD)"
+	@ ./scripts/assert-foundation-workspace.sh "$(TF)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ $(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh verify \
 		"$(FOUNDATION_PLAN)" "$(FOUNDATION_PLAN_MANIFEST)" "$(TF)" "." "../.."
-	@ ./scripts/assert-foundation-plan.sh "$(FOUNDATION_PLAN)" "$(TF)" apply
+	@ ./scripts/assert-foundation-plan.sh \
+		"$(FOUNDATION_PLAN)" "$(TF)" apply \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(ENV)"
 	@ $(TF) apply -input=false $(FOUNDATION_PLAN)
 	@ rm "$(FOUNDATION_PLAN)" "$(FOUNDATION_PLAN_MANIFEST)"
 
@@ -220,6 +239,12 @@ foundation-destroy-plan:
 	@ $(MAKE) foundation-config-guard foundation-toolchain-guard
 	@ printf "Planning review-only foundation destroy for env: `tput setaf 2``tput bold`$(ENV)`tput sgr0`\n\n"
 	@ ./scripts/assert-foundation-backend.sh "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)"
+	@ ./scripts/assert-foundation-state-bucket.sh \
+		"$(TERRAFORM_STATE_BUCKET)" \
+		"$(GCP_PROJECT_ID)" \
+		"$(GCP_REGION)" \
+		"$(GCLOUD)"
+	@ ./scripts/assert-foundation-workspace.sh "$(TF)"
 	@ ./scripts/assert-foundation-state.sh "$(TF)"
 	@ set -eu; \
 		temp_dir="$$(mktemp -d ".foundation-destroy-plan.$(ENV).XXXXXX")"; \
@@ -234,7 +259,9 @@ foundation-destroy-plan:
 			-input=false \
 			-compact-warnings; \
 		chmod 0600 "$${temp_plan}"; \
-		./scripts/assert-foundation-plan.sh "$${temp_plan}" "$(TF)" destroy; \
+		./scripts/assert-foundation-plan.sh \
+			"$${temp_plan}" "$(TF)" destroy \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(ENV)"; \
 		mv -f -- "$${temp_plan}" "$(FOUNDATION_DESTROY_PLAN)"; \
 		rmdir "$${temp_dir}"; \
 		trap - EXIT HUP INT TERM

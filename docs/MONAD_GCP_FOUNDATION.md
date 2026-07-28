@@ -28,14 +28,17 @@ sandbox nodes, workload VMs, or Packer image.
    gcloud config set project monad-code
    ```
 
-2. Copy `.env.gcp.template` to an ignored environment file and set only
+2. Install the versions pinned in `.tool-versions`. Run the workflow through
+   `mise exec` so both Terraform and gcloud resolve to those reviewed versions.
+
+3. Copy `.env.gcp.template` to an ignored environment file and set only
    non-secret deployment metadata there.
 
-3. Obtain the Cloudflare token and Postgres connection string, but do not put
+4. Obtain the Cloudflare token and Postgres connection string, but do not put
    either value in the environment file. The foundation creates their empty
    Secret Manager containers; versions are added out-of-band only after the
    reviewed foundation apply.
-4. Request the documented regional SSD quota before the workload phase.
+5. Request the documented regional SSD quota before the workload phase.
    The current `us-east4` instance quota is 24; model the reviewed smallest
    fleet and request headroom before any workload plan exceeds it.
 
@@ -43,13 +46,13 @@ sandbox nodes, workload VMs, or Packer image.
 
 ```bash
 make set-env ENV=dev
-make -C iac/provider-gcp foundation-init
-make -C iac/provider-gcp foundation-plan
-terraform -chdir=iac/provider-gcp show .tfplan.foundation.dev
-make -C iac/provider-gcp foundation-apply \
+mise exec -- make -C iac/provider-gcp foundation-init
+mise exec -- make -C iac/provider-gcp foundation-plan
+mise exec -- terraform -chdir=iac/provider-gcp show .tfplan.foundation.dev
+mise exec -- make -C iac/provider-gcp foundation-apply \
   CONFIRM='APPLY KEYLESS FOUNDATION'
-make -C iac/provider-gcp foundation-destroy-plan
-terraform -chdir=iac/provider-gcp show .tfplan.foundation-destroy.dev
+mise exec -- make -C iac/provider-gcp foundation-destroy-plan
+mise exec -- terraform -chdir=iac/provider-gcp show .tfplan.foundation-destroy.dev
 rm -f iac/provider-gcp/.tfplan.foundation-destroy.dev
 ```
 
@@ -59,7 +62,11 @@ and forces Anywhere Cache off even if an environment file says otherwise.
 Each environment uses an explicit backend prefix at
 `terraform/orchestration/<environment>/state`. Plan and apply fail unless the
 initialized backend metadata matches both the selected state bucket and that
-environment-specific prefix.
+environment-specific prefix. Plan, apply, and destroy-plan also re-read the
+live bucket and fail if its project, location, storage class, uniform access,
+public-access prevention, versioning, or 30-day soft-delete policy has drifted.
+The workflow requires Terraform's `default` workspace because environment
+isolation is provided by the explicit backend prefix instead.
 
 `foundation-init` is the only pre-plan cloud mutation: it bootstraps the remote
 state bucket when absent, then enforces and re-reads its immutable project and
@@ -99,6 +106,11 @@ and writes a 0600 provenance manifest binding the plan digest to the Git commit,
 Terraform source and lock file, environment inputs, project, region, backend,
 and exact Terraform version. Apply recomputes that manifest and refuses any
 source, input, backend, toolchain, or plan-byte drift.
+Terraform's implicit `terraform.tfvars`, `terraform.tfvars.json`, and
+`*.auto.tfvars*` inputs are rejected; reviewed optional values belong only in
+the explicit `.terraform.<environment>.tfvars` file. The saved plan must also
+report the selected project, region, and environment before it can be
+published or applied.
 Keep it on the trusted operator machine, do not upload it or persist
 `terraform show -json` output, and remove an abandoned plan with:
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plan_path="${1:?usage: assert-foundation-plan.sh PLAN_PATH [TERRAFORM_BIN] [apply|destroy]}"
+plan_path="${1:?usage: assert-foundation-plan.sh PLAN_PATH [TERRAFORM_BIN] [apply|destroy] [PROJECT REGION ENVIRONMENT]}"
 terraform_bin="${2:-terraform}"
 mode="${3:-apply}"
+expected_project="${4:-}"
+expected_region="${5:-}"
+expected_environment="${6:-}"
 
 if [[ "${mode}" != "apply" && "${mode}" != "destroy" ]]; then
   printf 'Unsupported foundation plan inspection mode: %s\n' "${mode}" >&2
@@ -61,8 +64,34 @@ forbidden_credentials="$(
     | .address
   ' <<<"${plan_json}"
 )"
+identity_mismatches="$(
+  jq -r \
+    --arg expected_project "${expected_project}" \
+    --arg expected_region "${expected_region}" \
+    --arg expected_environment "${expected_environment}" \
+    '
+      [
+        if $expected_project != ""
+          and (.variables.gcp_project_id.value? != $expected_project)
+        then "gcp_project_id: expected=\($expected_project) actual=\(.variables.gcp_project_id.value? // "<missing>")"
+        else empty end,
+        if $expected_region != ""
+          and (.variables.gcp_region.value? != $expected_region)
+        then "gcp_region: expected=\($expected_region) actual=\(.variables.gcp_region.value? // "<missing>")"
+        else empty end,
+        if $expected_environment != ""
+          and (.variables.environment.value? != $expected_environment)
+        then "environment: expected=\($expected_environment) actual=\(.variables.environment.value? // "<missing>")"
+        else empty end
+      ]
+      | .[]
+    ' <<<"${plan_json}"
+)"
 
-if [[ -n "${unexpected_addresses}" || -n "${disallowed_changes}" || -n "${forbidden_credentials}" ]]; then
+if [[ -n "${unexpected_addresses}" \
+  || -n "${disallowed_changes}" \
+  || -n "${forbidden_credentials}" \
+  || -n "${identity_mismatches}" ]]; then
   printf 'Refusing foundation plan: review allowlist failed.\n' >&2
   if [[ -n "${unexpected_addresses}" ]]; then
     printf 'Changed addresses outside module.init:\n%s\n' "${unexpected_addresses}" >&2
@@ -72,6 +101,10 @@ if [[ -n "${unexpected_addresses}" || -n "${disallowed_changes}" || -n "${forbid
   fi
   if [[ -n "${forbidden_credentials}" ]]; then
     printf 'Forbidden long-lived credential resources:\n%s\n' "${forbidden_credentials}" >&2
+  fi
+  if [[ -n "${identity_mismatches}" ]]; then
+    printf 'Plan identity does not match the selected foundation context:\n%s\n' \
+      "${identity_mismatches}" >&2
   fi
   exit 1
 fi

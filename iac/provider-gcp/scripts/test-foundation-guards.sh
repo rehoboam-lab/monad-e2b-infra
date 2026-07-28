@@ -98,6 +98,72 @@ JSON
 expect_pass "foundation create plan" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
 
 cat >"${plan_json_file}" <<'JSON'
+{
+  "variables": {
+    "gcp_project_id": {"value": "monad-code"},
+    "gcp_region": {"value": "us-east4"},
+    "environment": {"value": "dev"}
+  },
+  "resource_changes": [
+    {
+      "address": "module.init.google_project_service.compute_engine_api",
+      "mode": "managed",
+      "type": "google_project_service",
+      "change": {"actions": ["create"]}
+    }
+  ]
+}
+JSON
+expect_pass \
+  "plan identity matches selected context" \
+  "${script_dir}/assert-foundation-plan.sh" \
+  ignored \
+  "${fake_terraform}" \
+  apply \
+  monad-code \
+  us-east4 \
+  dev
+
+jq '.variables.gcp_project_id.value = "other-project"' \
+  "${plan_json_file}" >"${plan_json_file}.next"
+mv "${plan_json_file}.next" "${plan_json_file}"
+expect_fail \
+  "plan project cannot override selected context" \
+  "${script_dir}/assert-foundation-plan.sh" \
+  ignored \
+  "${fake_terraform}" \
+  apply \
+  monad-code \
+  us-east4 \
+  dev
+
+jq '.variables.gcp_project_id.value = "monad-code" | .variables.gcp_region.value = "us-west1"' \
+  "${plan_json_file}" >"${plan_json_file}.next"
+mv "${plan_json_file}.next" "${plan_json_file}"
+expect_fail \
+  "plan region cannot override selected context" \
+  "${script_dir}/assert-foundation-plan.sh" \
+  ignored \
+  "${fake_terraform}" \
+  apply \
+  monad-code \
+  us-east4 \
+  dev
+
+jq '.variables.gcp_region.value = "us-east4" | .variables.environment.value = "prod"' \
+  "${plan_json_file}" >"${plan_json_file}.next"
+mv "${plan_json_file}.next" "${plan_json_file}"
+expect_fail \
+  "plan environment cannot override selected context" \
+  "${script_dir}/assert-foundation-plan.sh" \
+  ignored \
+  "${fake_terraform}" \
+  apply \
+  monad-code \
+  us-east4 \
+  dev
+
+cat >"${plan_json_file}" <<'JSON'
 {"resource_changes":[{"address":"module.cluster.google_compute_instance.server","mode":"managed","type":"google_compute_instance","change":{"actions":["create"]}}]}
 JSON
 expect_fail "plan outside module.init" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply

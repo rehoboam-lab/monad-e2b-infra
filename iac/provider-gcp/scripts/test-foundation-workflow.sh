@@ -66,9 +66,41 @@ expect_fail \
   terraform/orchestration/dev/state \
   "${workspace}/missing-backend"
 
+var_source_config="${workspace}/var-sources"
+explicit_var_file="${var_source_config}/.terraform.dev.tfvars"
+mkdir -p "${var_source_config}"
+expect_pass \
+  "no implicit Terraform var sources" \
+  "${script_dir}/assert-foundation-var-sources.sh" \
+  "${var_source_config}" \
+  "${explicit_var_file}"
+printf 'prefix = "reviewed-"\n' >"${explicit_var_file}"
+expect_pass \
+  "explicit environment var file is allowed" \
+  "${script_dir}/assert-foundation-var-sources.sh" \
+  "${var_source_config}" \
+  "${explicit_var_file}"
+
+for implicit_name in \
+  terraform.tfvars \
+  terraform.tfvars.json \
+  stale.auto.tfvars \
+  stale.auto.tfvars.json \
+  .hidden.auto.tfvars; do
+  printf 'gcp_project_id = "wrong-project"\n' >"${var_source_config}/${implicit_name}"
+  expect_fail \
+    "implicit Terraform var source ${implicit_name}" \
+    "${script_dir}/assert-foundation-var-sources.sh" \
+    "${var_source_config}" \
+    "${explicit_var_file}"
+  rm -f "${var_source_config}/${implicit_name}"
+done
+
 fake_terraform="${workspace}/terraform"
 fake_terraform_version="${workspace}/terraform-version"
+fake_terraform_workspace="${workspace}/terraform-workspace"
 printf '1.7.5\n' >"${fake_terraform_version}"
+printf 'default\n' >"${fake_terraform_workspace}"
 cat >"${fake_terraform}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -76,6 +108,13 @@ set -euo pipefail
 case "${1:-}" in
   version)
     printf '{"terraform_version":"%s"}\n' "$(cat "${FAKE_TERRAFORM_VERSION_FILE}")"
+    ;;
+  workspace)
+    if [[ "${2:-}" != "show" ]]; then
+      printf 'unexpected fake Terraform workspace command\n' >&2
+      exit 2
+    fi
+    cat "${FAKE_TERRAFORM_WORKSPACE_FILE}"
     ;;
   *)
     printf 'unexpected fake Terraform command: %s\n' "${1:-<none>}" >&2
@@ -102,6 +141,7 @@ printf 'reviewed plan bytes\n' >"${metadata_plan}"
 chmod 0600 "${metadata_plan}"
 
 export FAKE_TERRAFORM_VERSION_FILE="${fake_terraform_version}"
+export FAKE_TERRAFORM_WORKSPACE_FILE="${fake_terraform_workspace}"
 export FOUNDATION_ENV="dev"
 export FOUNDATION_ENV_FILE="${metadata_env}"
 export FOUNDATION_TF_VAR_FILE="${workspace}/absent.tfvars"
@@ -109,6 +149,22 @@ export FOUNDATION_GCP_PROJECT_ID="monad-code"
 export FOUNDATION_GCP_REGION="us-east4"
 export FOUNDATION_STATE_BUCKET="monad-state"
 export FOUNDATION_STATE_PREFIX="terraform/orchestration/dev/state"
+expect_pass \
+  "default Terraform workspace" \
+  "${script_dir}/assert-foundation-workspace.sh" \
+  "${fake_terraform}"
+printf 'other\n' >"${fake_terraform_workspace}"
+expect_fail \
+  "stored non-default Terraform workspace" \
+  "${script_dir}/assert-foundation-workspace.sh" \
+  "${fake_terraform}"
+printf 'default\n' >"${fake_terraform_workspace}"
+expect_fail \
+  "ambient non-default Terraform workspace" \
+  env \
+  TF_WORKSPACE=other \
+  "${script_dir}/assert-foundation-workspace.sh" \
+  "${fake_terraform}"
 metadata_fingerprint="$(
   "${script_dir}/foundation-plan-metadata.sh" \
     fingerprint \
@@ -254,26 +310,53 @@ secure=false
 if [[ -f "${FAKE_BUCKET_UPDATED_FILE}" && "${mode}" != "insecure-after-update" ]]; then
   secure=true
 fi
+case "${mode}" in
+  secure|wrong-project|wrong-location|drift-storage-class|drift-uniform-access|drift-public-access-prevention|drift-versioning|drift-soft-delete)
+    secure=true
+    ;;
+esac
 
 if [[ "${secure}" == true ]]; then
+  storage_class="STANDARD"
+  uniform_access=true
+  public_access_prevention="enforced"
+  versioning=true
+  soft_delete_seconds="2592000"
+  case "${mode}" in
+    drift-storage-class)
+      storage_class="NEARLINE"
+      ;;
+    drift-uniform-access)
+      uniform_access=false
+      ;;
+    drift-public-access-prevention)
+      public_access_prevention="inherited"
+      ;;
+    drift-versioning)
+      versioning=false
+      ;;
+    drift-soft-delete)
+      soft_delete_seconds="604800"
+      ;;
+  esac
   cat <<JSON
 {
-  "name": "monad-state",
+  "name": "${FAKE_BUCKET_NAME:-monad-state}",
   "projectNumber": "${project_number}",
   "location": "${location}",
-  "storageClass": "STANDARD",
+  "storageClass": "${storage_class}",
   "iamConfiguration": {
-    "uniformBucketLevelAccess": {"enabled": true},
-    "publicAccessPrevention": "enforced"
+    "uniformBucketLevelAccess": {"enabled": ${uniform_access}},
+    "publicAccessPrevention": "${public_access_prevention}"
   },
-  "versioning": {"enabled": true},
-  "softDeletePolicy": {"retentionDurationSeconds": "2592000"}
+  "versioning": {"enabled": ${versioning}},
+  "softDeletePolicy": {"retentionDurationSeconds": "${soft_delete_seconds}"}
 }
 JSON
 else
   cat <<JSON
 {
-  "name": "monad-state",
+  "name": "${FAKE_BUCKET_NAME:-monad-state}",
   "projectNumber": "${project_number}",
   "location": "${location}",
   "storageClass": "NEARLINE",
@@ -293,6 +376,7 @@ export FAKE_BUCKET_MODE_FILE="${bucket_mode_file}"
 export FAKE_BUCKET_CREATED_FILE="${bucket_created_file}"
 export FAKE_BUCKET_UPDATED_FILE="${bucket_updated_file}"
 export FAKE_BUCKET_LOG_FILE="${bucket_log_file}"
+unset FAKE_BUCKET_NAME
 
 reset_bucket_fixture() {
   rm -f \
@@ -300,6 +384,43 @@ reset_bucket_fixture() {
     "${bucket_updated_file}" \
     "${bucket_log_file}"
 }
+
+reset_bucket_fixture
+printf 'secure\n' >"${bucket_mode_file}"
+expect_pass \
+  "live state bucket identity and security remain valid" \
+  "${script_dir}/assert-foundation-state-bucket.sh" \
+  monad-state \
+  monad-code \
+  us-east4 \
+  "${fake_gcloud}"
+test ! -f "${bucket_created_file}"
+test ! -f "${bucket_updated_file}"
+if grep -Eq 'storage buckets (create|update)' "${bucket_log_file}"; then
+  printf 'read-only state bucket assertion attempted a mutation\n' >&2
+  exit 1
+fi
+
+for drift_mode in \
+  wrong-project \
+  wrong-location \
+  drift-storage-class \
+  drift-uniform-access \
+  drift-public-access-prevention \
+  drift-versioning \
+  drift-soft-delete; do
+  reset_bucket_fixture
+  printf '%s\n' "${drift_mode}" >"${bucket_mode_file}"
+  expect_fail \
+    "live state bucket rejects ${drift_mode}" \
+    "${script_dir}/assert-foundation-state-bucket.sh" \
+    monad-state \
+    monad-code \
+    us-east4 \
+    "${fake_gcloud}"
+  test ! -f "${bucket_created_file}"
+  test ! -f "${bucket_updated_file}"
+done
 
 reset_bucket_fixture
 printf 'missing\n' >"${bucket_mode_file}"
@@ -415,6 +536,9 @@ case "${1:-}" in
   version)
     printf '{"terraform_version":"1.7.5"}\n'
     ;;
+  workspace)
+    printf 'default\n'
+    ;;
   state)
     printf 'No state file was found!\n' >&2
     exit 1
@@ -436,7 +560,21 @@ case "${1:-}" in
     ;;
   show)
     cat <<'JSON'
-{"resource_changes":[{"address":"module.init.google_project_service.compute_engine_api","mode":"managed","type":"google_project_service","change":{"actions":["create"]}}]}
+{
+  "variables": {
+    "gcp_project_id": {"value": "monad-code"},
+    "gcp_region": {"value": "us-east4"},
+    "environment": {"value": "dev"}
+  },
+  "resource_changes": [
+    {
+      "address": "module.init.google_project_service.compute_engine_api",
+      "mode": "managed",
+      "type": "google_project_service",
+      "change": {"actions": ["create"]}
+    }
+  ]
+}
 JSON
     ;;
   apply)
@@ -451,12 +589,23 @@ EOF
 chmod 0755 "${workflow_terraform}"
 export WORKFLOW_PLAN_MODE_FILE="${workflow_plan_mode}"
 export WORKFLOW_APPLY_MARKER="${workflow_apply_marker}"
+export FAKE_BUCKET_NAME="monad-code-terraform-state"
+reset_bucket_fixture
+printf 'secure\n' >"${bucket_mode_file}"
 
 git -C "${workflow_repo}" init -q
 git -C "${workflow_repo}" config user.name "Foundation Guard Test"
 git -C "${workflow_repo}" config user.email "foundation-guard@example.invalid"
 git -C "${workflow_repo}" add -A
 git -C "${workflow_repo}" commit -qm "fixture"
+
+printf 'gcp_project_id = "wrong-project"\n' >"${workflow_provider}/stale.auto.tfvars"
+expect_fail \
+  "full workflow rejects ignored auto-loaded var source" \
+  make -C "${workflow_provider}" foundation-plan \
+  TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}"
+rm -f "${workflow_provider}/stale.auto.tfvars"
 
 stale_plan="${workflow_provider}/.tfplan.foundation.dev"
 stale_manifest="${stale_plan}.manifest"
@@ -467,7 +616,8 @@ printf 'fail\n' >"${workflow_plan_mode}"
 expect_fail \
   "failed replan removes stale plan and provenance" \
   make -C "${workflow_provider}" foundation-plan \
-  TF="${workflow_terraform}"
+  TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}"
 test ! -e "${stale_plan}"
 test ! -e "${stale_manifest}"
 
@@ -475,15 +625,27 @@ printf 'success\n' >"${workflow_plan_mode}"
 expect_pass \
   "successful plan atomically publishes plan and provenance" \
   make -C "${workflow_provider}" foundation-plan \
-  TF="${workflow_terraform}"
+  TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}"
 test -f "${stale_plan}"
 test -f "${stale_manifest}"
+
+printf 'drift-versioning\n' >"${bucket_mode_file}"
+expect_fail \
+  "apply rejects live state bucket security drift" \
+  make -C "${workflow_provider}" foundation-apply \
+  TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}" \
+  CONFIRM='APPLY KEYLESS FOUNDATION'
+test ! -e "${workflow_apply_marker}"
+printf 'secure\n' >"${bucket_mode_file}"
 
 printf '\n# changed after review\n' >>"${workflow_provider}/main.tf"
 expect_fail \
   "apply rejects source drift before Terraform apply" \
   make -C "${workflow_provider}" foundation-apply \
   TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}" \
   CONFIRM='APPLY KEYLESS FOUNDATION'
 test ! -e "${workflow_apply_marker}"
 
@@ -496,6 +658,7 @@ expect_pass \
   "unchanged reviewed plan reaches Terraform apply" \
   make -C "${workflow_provider}" foundation-apply \
   TF="${workflow_terraform}" \
+  GCLOUD="${fake_gcloud}" \
   CONFIRM='APPLY KEYLESS FOUNDATION'
 test -f "${workflow_apply_marker}"
 test ! -e "${stale_plan}"
