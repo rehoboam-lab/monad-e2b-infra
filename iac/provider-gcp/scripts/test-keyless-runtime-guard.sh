@@ -4,6 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 guard="${script_dir}/assert-keyless-runtime.sh"
+cloud_build_tf="${script_dir}/../init/cloud-build.tf"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
@@ -25,5 +26,16 @@ if "$guard" "${test_dir}/acl-bad.txt" >"${test_dir}/acl-bad.log" 2>&1; then
   exit 1
 fi
 grep -F "Static GCP credentials are forbidden" "${test_dir}/acl-bad.log" >/dev/null
+
+if [[ -f "$cloud_build_tf" ]]; then
+  grep -F 'service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com' \
+    "$cloud_build_tf" >/dev/null
+  grep -F 'resource "google_project_iam_member" "cloud_build_regional_service_agent"' \
+    "$cloud_build_tf" >/dev/null
+  grep -F 'resource "google_service_account_iam_member" "cloud_build_regional_image_builder_token_creator"' \
+    "$cloud_build_tf" >/dev/null
+  grep -F 'resource "google_storage_bucket_iam_member" "cloud_build_source_reader"' \
+    "$cloud_build_tf" >/dev/null
+fi
 
 echo "Keyless GCP runtime guard tests passed."
