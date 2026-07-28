@@ -257,6 +257,9 @@ reads only allowlisted non-secret deployment metadata from `.env.dev`; implicit
 Terraform/Packer variable files, static Google credentials, ambient
 `TF_CLI_ARGS*`, `PKR_VAR_*`, HCP Packer settings, alternate workspaces,
 symlinks, unexpected HCL, and dirty Git worktrees fail closed.
+Repository-pinned tool versions, source image, artifact lock, topology policy,
+lease helper, smoke machine type, release identities, and one-hour plan age
+cannot be replaced with Make command-line assignments.
 
 Run the sequence from a clean, committed checkout with the exact Terraform,
 Packer, and gcloud versions in `.tool-versions`:
@@ -282,7 +285,8 @@ are mode `0600` and are published only after the complete human plan is
 displayed.
 
 Provenance binds the plan bytes, Git SHA, complete reviewed Packer/Terraform
-source and setup files (including Ops Agent YAML and file modes), exact
+source and setup files (including the root-artifact lock, Ops Agent YAML, and
+file modes), exact
 Terraform/Packer/gcloud binaries, isolated plugin bytes, selected inputs,
 backend, Terraform state lineage/serial, and the resolved Ubuntu source image
 identity. The source binding records its self-link, ID, archive size, disk size,
@@ -291,19 +295,22 @@ name. The plan expires after one hour. Its confirmation contains the manifest
 digest, environment, project, and deterministic one-shot candidate image, so a
 confirmation from one plan cannot authorize another.
 
-Immediately before any mutation, the apply/build stage repeats the static
-Packer reserve and live quota checks. Live headroom must preserve the complete
-policy peak across global and regional CPUs, the E2 family, instances, SSD and
-standard persistent disks, local SSD, and regional addresses. It then acquires
-the shared rollout lease:
+The apply/build stage acquires the shared rollout lease before it repeats any
+live capacity, backend/state, provenance, saved-plan, or candidate-image
+check. Those final checks therefore cannot race a workload rollout. Live
+headroom must preserve the complete policy peak across `CPUS_ALL_REGIONS`, the
+regional `CPUS` quota shared by E2 and N1, instances, SSD and standard
+persistent disks, local SSD, and regional addresses. The lease is:
 
 ```text
-gs://<state-bucket>/operator-locks/<project>/<region>/workload-mutation.json
+gs://<project>-terraform-state/operator-locks/<project>/<region>/workload-mutation.json
 ```
 
-The lease is created with generation-match zero and released only with the
-captured generation and holder. Workload rollout automation must use the same
-lease, which serializes Packer against MIG changes. A stale or partially
+The bucket name is canonical and cannot be overridden; the lease scope is one
+project and region. The lease is created with generation-match zero and
+released only with the captured generation and holder. Workload rollout
+automation must use the same regional lease, which serializes Packer against
+MIG changes. A stale or partially
 captured lease is never stolen or deleted automatically. Inspect it with:
 
 ```bash
@@ -320,16 +327,26 @@ Terraform consumes only the reviewed saved plan. A subsequent read-only plan
 must return exactly no changes before Packer starts. Packer rechecks all
 build-input provenance, refuses an existing candidate image, runs one source
 without `-force`, and publishes to the environment-qualified candidate family.
+The exact ready Ubuntu source is
+`ubuntu-2404-noble-amd64-v20260723`. Ubuntu dependencies resolve from snapshot
+`20260728T000000Z`; Docker, GCSFuse, Ops Agent, docker-credential-gcr,
+bash-commons, Consul, Nomad, CNI, and ClickHouse inputs use exact URLs and
+committed digests from `setup/root-artifacts.lock.json` or the reviewed shared
+installer mappings. Packer records that lock digest in its manifest.
 The build VM has `disable_default_service_account = true`; Packer uses the
 operator's ADC for control-plane calls and attaches no GCE service account to
 the root-running build guest. Exactly one manifest artifact and the resulting
-ready image identity must match before promotion. Still under the same rollout
-lease, the workflow moves that exact image into the canonical `<prefix>orch`
-family and requires `describe-from-family` to resolve the same image ID and
-self-link before it consumes the plan or releases the lease. Workloads never
-resolve the candidate family. If canonical promotion begins but cannot be
-verified, cleanup deliberately preserves the lease and token for manual
-recovery.
+ready image identity must match. A disposable, service-account-free VM then
+boots that exact image, not its family, and proves Docker, Nomad dev mode,
+Consul dev mode, and nested KVM work before it is deleted. Only then, still
+under the same rollout lease, the workflow moves that exact image into the
+canonical `<prefix>orch` family and requires `describe-from-family` to resolve
+the same image ID and self-link before it consumes the plan or releases the
+lease. Workloads never resolve the candidate family. Promotion is idempotent:
+a retry verifies and accepts an already-complete exact promotion, including
+the case where the update succeeded but its client response failed. If
+canonical promotion begins but cannot be verified, cleanup deliberately
+preserves the lease and token for manual recovery.
 
 On Terraform, drift, or Packer failure, the target fails and preserves the
 saved plan/provenance for diagnosis; Packer never runs after a failed apply or
@@ -337,6 +354,12 @@ non-empty post-apply plan. The shared lease is released by a generation-bound
 cleanup trap when possible. The workflow never exports secrets, uses `-force`,
 exposes an unverified image through the canonical runtime family, or destroys
 network state.
+
+For the first internal canary, direct upstream HTTPS plus committed digests
+and the Ubuntu snapshot is the deliberate availability trade-off. A
+content-addressed Engram mirror, durable smoke attestation, multi-region lease
+coordination, and mirrored Packer-plugin bootstrap remain follow-up hardening;
+none is required to run the single-region canary safely.
 
 After the foundation apply, add the Cloudflare secret version directly over
 stdin so its value never enters shell history. Replace `<prefix>` with the

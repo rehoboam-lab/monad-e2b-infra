@@ -1,55 +1,59 @@
 ENV ?= $(shell cat ../../../.last_used_env 2>/dev/null || echo "not-set")
-ENV_FILE := ../../../.env.$(ENV)
-REPO_ROOT := $(abspath ../../..)
-PROVIDER_ROOT := $(abspath ..)
-CONFIG_ROOT := $(CURDIR)
+override ENV_FILE := ../../../.env.$(ENV)
+override REPO_ROOT := $(abspath ../../..)
+override PROVIDER_ROOT := $(abspath ..)
+override CONFIG_ROOT := $(abspath .)
 
 TF := $(shell command -v terraform 2>/dev/null)
 PACKER := $(shell command -v packer 2>/dev/null)
 GCLOUD := $(shell command -v gcloud 2>/dev/null)
-EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../../.tool-versions)
-EXPECTED_PACKER_VERSION := $(shell awk '$$1 == "packer" { print $$2; exit }' ../../../.tool-versions)
-EXPECTED_GCLOUD_VERSION := $(shell awk '$$1 == "gcloud" { print $$2; exit }' ../../../.tool-versions)
-ENV_VALUE := ./scripts/read-env-value.sh
+override EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../../.tool-versions)
+override EXPECTED_PACKER_VERSION := $(shell awk '$$1 == "packer" { print $$2; exit }' ../../../.tool-versions)
+override EXPECTED_GCLOUD_VERSION := $(shell awk '$$1 == "gcloud" { print $$2; exit }' ../../../.tool-versions)
+override ENV_VALUE := ./scripts/read-env-value.sh
 
-GCP_PROJECT_ID ?= $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_PROJECT_ID)
-GCP_REGION ?= $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_REGION)
-GCP_ZONE ?= $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_ZONE)
-TERRAFORM_STATE_BUCKET ?= $(shell $(ENV_VALUE) "$(ENV_FILE)" TERRAFORM_STATE_BUCKET)
-TERRAFORM_STATE_BUCKET := $(if $(TERRAFORM_STATE_BUCKET),$(TERRAFORM_STATE_BUCKET),$(GCP_PROJECT_ID)-terraform-state)
-PREFIX ?= $(shell $(ENV_VALUE) "$(ENV_FILE)" PREFIX)
-PREFIX := $(if $(PREFIX),$(PREFIX),e2b-)
+override GCP_PROJECT_ID := $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_PROJECT_ID)
+override GCP_REGION := $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_REGION)
+override GCP_ZONE := $(shell $(ENV_VALUE) "$(ENV_FILE)" GCP_ZONE)
+override TERRAFORM_STATE_BUCKET := $(shell $(ENV_VALUE) "$(ENV_FILE)" TERRAFORM_STATE_BUCKET)
+override TERRAFORM_STATE_BUCKET := $(if $(TERRAFORM_STATE_BUCKET),$(TERRAFORM_STATE_BUCKET),$(GCP_PROJECT_ID)-terraform-state)
+override PREFIX := $(shell $(ENV_VALUE) "$(ENV_FILE)" PREFIX)
+override PREFIX := $(if $(PREFIX),$(PREFIX),e2b-)
 
 override TERRAFORM_STATE_PREFIX := terraform/cluster-disk-image/state
-PACKER_NETWORK_NAME ?= e2b-build-cluster-disk-image
-PACKER_SUBNET_NAME ?= e2b-build-cluster-disk-image-subnetwork
-PACKER_CONSUL_VERSION ?= 1.17.3
-PACKER_NOMAD_VERSION ?= 1.8.4
-PACKER_SOURCE_IMAGE ?= ubuntu-2404-noble-amd64-v20260517
-PACKER_PLUGIN_PATH := $(CONFIG_ROOT)/.packer-plugins
-PACKER_SOURCE_REVISION := $(shell git -C "$(REPO_ROOT)" rev-parse --verify HEAD 2>/dev/null)
-PACKER_SOURCE_REVISION_SHORT := $(shell printf '%s' "$(PACKER_SOURCE_REVISION)" | cut -c1-12)
-PACKER_IMAGE_FAMILY ?= $(PREFIX)orch-$(ENV)-candidate
-PACKER_CANONICAL_IMAGE_FAMILY ?= $(PREFIX)orch
-PACKER_IMAGE_NAME ?= $(PACKER_IMAGE_FAMILY)-$(PACKER_SOURCE_REVISION_SHORT)
-PACKER_GATE_MAX_PLAN_AGE_SECONDS ?= 3600
+override ROOT_ARTIFACT_LOCK := $(CONFIG_ROOT)/setup/root-artifacts.lock.json
+override ROOT_ARTIFACT_LOCK_SHA256 := $(shell shasum -a 256 "$(ROOT_ARTIFACT_LOCK)" 2>/dev/null | awk '{print $$1}')
+override PACKER_NETWORK_NAME := e2b-build-cluster-disk-image
+override PACKER_SUBNET_NAME := e2b-build-cluster-disk-image-subnetwork
+override PACKER_CONSUL_VERSION := $(shell jq -er '.consul.version' "$(ROOT_ARTIFACT_LOCK)" 2>/dev/null)
+override PACKER_NOMAD_VERSION := $(shell jq -er '.nomad.version' "$(ROOT_ARTIFACT_LOCK)" 2>/dev/null)
+override PACKER_DOCKER_VERSION := $(shell jq -er '.docker_engine_version' "$(ROOT_ARTIFACT_LOCK)" 2>/dev/null)
+override PACKER_SOURCE_IMAGE := ubuntu-2404-noble-amd64-v20260723
+override PACKER_PLUGIN_PATH := $(CONFIG_ROOT)/.packer-plugins
+override PACKER_SOURCE_REVISION := $(shell git -C "$(REPO_ROOT)" rev-parse --verify HEAD 2>/dev/null)
+override PACKER_SOURCE_REVISION_SHORT := $(shell printf '%s' "$(PACKER_SOURCE_REVISION)" | cut -c1-12)
+override PACKER_IMAGE_FAMILY := $(PREFIX)orch-$(ENV)-candidate
+override PACKER_CANONICAL_IMAGE_FAMILY := $(PREFIX)orch
+override PACKER_IMAGE_NAME := $(PACKER_IMAGE_FAMILY)-$(PACKER_SOURCE_REVISION_SHORT)
+override PACKER_GATE_MAX_PLAN_AGE_SECONDS := 3600
 
-NETWORK_PLAN := .tfplan.network.$(ENV)
-NETWORK_PLAN_MANIFEST := $(NETWORK_PLAN).manifest
-PACKER_BUILD_MANIFEST := .packer-build-manifest.$(ENV).json
-ROLLOUT_LEASE_TOKEN := .rollout-lease-token.$(ENV).json
-LOCAL_LOCK_DIR := .operator-canary.$(ENV).lock
-POLICY_PATH := $(PROVIDER_ROOT)/topology/minimal-workload-policy.json
-PACKER_RESERVE_GUARD := $(PROVIDER_ROOT)/scripts/assert-packer-reserve.sh
-ROLLOUT_LEASE := $(PROVIDER_ROOT)/scripts/rollout-mutation-lease.sh
+override NETWORK_PLAN := .tfplan.network.$(ENV)
+override NETWORK_PLAN_MANIFEST := $(NETWORK_PLAN).manifest
+override PACKER_BUILD_MANIFEST := .packer-build-manifest.$(ENV).json
+override ROLLOUT_LEASE_TOKEN := .rollout-lease-token.$(ENV).json
+override LOCAL_LOCK_DIR := .operator-canary.$(ENV).lock
+override POLICY_PATH := $(PROVIDER_ROOT)/topology/minimal-workload-policy.json
+override PACKER_SMOKE_MACHINE_TYPE := $(shell jq -er '.transient_reserve.machine_type' "$(POLICY_PATH)" 2>/dev/null)
+override PACKER_RESERVE_GUARD := $(PROVIDER_ROOT)/scripts/assert-packer-reserve.sh
+override ROLLOUT_LEASE := $(PROVIDER_ROOT)/scripts/rollout-mutation-lease.sh
 
-tf_vars := \
+override tf_vars := \
 	TF_VAR_gcp_project_id="$(GCP_PROJECT_ID)" \
 	TF_VAR_gcp_region="$(GCP_REGION)" \
 	TF_VAR_network_name="$(PACKER_NETWORK_NAME)" \
 	TF_VAR_subnet_name="$(PACKER_SUBNET_NAME)"
 
-packer_vars := \
+override packer_vars := \
 	-var "build_manifest_path=$(PACKER_BUILD_MANIFEST)" \
 	-var "consul_version=$(PACKER_CONSUL_VERSION)" \
 	-var "gcp_project_id=$(GCP_PROJECT_ID)" \
@@ -63,7 +67,7 @@ packer_vars := \
 	-var "source_revision=$(PACKER_SOURCE_REVISION)" \
 	-var "subnet_name=$(PACKER_SUBNET_NAME)"
 
-define metadata_context
+override define metadata_context
 PACKER_GATE_ENV="$(ENV)" \
 PACKER_GATE_ENV_FILE="$(abspath $(ENV_FILE))" \
 PACKER_GATE_GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
@@ -112,7 +116,7 @@ operator-canary-toolchain-guard:
 	test "$$actual" = "$(EXPECTED_TERRAFORM_VERSION)" || (printf "Terraform %s is required; found %s at %s.\n" "$(EXPECTED_TERRAFORM_VERSION)" "$$actual" "$(TF)"; exit 1)
 	@ actual="$$("$(PACKER)" version -machine-readable | awk -F, '$$3 == "version" { print $$4; exit }')"; \
 	test "$$actual" = "$(EXPECTED_PACKER_VERSION)" || (printf "Packer %s is required; found %s at %s.\n" "$(EXPECTED_PACKER_VERSION)" "$$actual" "$(PACKER)"; exit 1)
-	@ actual="$$("$(GCLOUD)" version --format=json | jq -er '.\"Google Cloud SDK\"')"; \
+	@ actual="$$("$(GCLOUD)" version --format=json | jq -er '."Google Cloud SDK"')"; \
 	test "$$actual" = "$(EXPECTED_GCLOUD_VERSION)" || (printf "gcloud %s is required; found %s at %s.\n" "$(EXPECTED_GCLOUD_VERSION)" "$$actual" "$(GCLOUD)"; exit 1)
 
 .PHONY: operator-canary-static-check
@@ -132,6 +136,7 @@ operator-canary-config-guard: operator-canary-static-check
 	@ printf '%s' "$(GCP_REGION)" | grep -Eq '^[a-z]+-[a-z]+[0-9]$$' || (printf "Invalid GCP_REGION.\n"; exit 1)
 	@ printf '%s' "$(GCP_ZONE)" | grep -Eq '^$(GCP_REGION)-[a-z]$$' || (printf "GCP_ZONE must belong to GCP_REGION.\n"; exit 1)
 	@ printf '%s' "$(TERRAFORM_STATE_BUCKET)" | grep -Eq '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$$' || (printf "Invalid state bucket.\n"; exit 1)
+	@ test "$(TERRAFORM_STATE_BUCKET)" = "$(GCP_PROJECT_ID)-terraform-state" || (printf "The shared rollout lease requires canonical state bucket %s-terraform-state; found %s.\n" "$(GCP_PROJECT_ID)" "$(TERRAFORM_STATE_BUCKET)"; exit 1)
 	@ printf '%s' "$(PACKER_NETWORK_NAME)" | grep -Eq '^[a-z][a-z0-9-]{0,61}[a-z0-9]$$' || (printf "Invalid Packer network name.\n"; exit 1)
 	@ printf '%s' "$(PACKER_SUBNET_NAME)" | grep -Eq '^[a-z][a-z0-9-]{0,61}[a-z0-9]$$' || (printf "Invalid Packer subnet name.\n"; exit 1)
 	@ printf '%s' "$(PACKER_IMAGE_FAMILY)" | grep -Eq '^[a-z][a-z0-9-]{0,61}[a-z0-9]$$' || (printf "Invalid candidate image family.\n"; exit 1)
@@ -202,6 +207,15 @@ operator-canary-apply-build: operator-canary-toolchain-guard operator-canary-con
 	test -f "$(NETWORK_PLAN_MANIFEST)" && test ! -L "$(NETWORK_PLAN_MANIFEST)" || (printf "Missing plan provenance. Run operator-canary-plan.\n"; exit 1); \
 	expected_confirmation="$$($(metadata_context) ./scripts/network-plan-metadata.sh confirmation "$(NETWORK_PLAN_MANIFEST)")"; \
 	test "$(CONFIRM)" = "$${expected_confirmation}" || (printf "Confirmation mismatch. Re-read the exact value emitted by operator-canary-plan.\n"; exit 1); \
+	mkdir "$(LOCAL_LOCK_DIR)" 2>/dev/null || (printf "Another local operator-canary workflow holds %s.\n" "$(LOCAL_LOCK_DIR)"; exit 1); \
+	temp_dir="$$(mktemp -d ".operator-apply.$(ENV).XXXXXX")"; \
+	lease_acquired=false; \
+	promotion_started=false; \
+	cleanup() { status=$$?; if [ "$${lease_acquired}" = true ] && [ "$${promotion_started}" = false ]; then "$(ROLLOUT_LEASE)" release "$(GCLOUD)" "$(ROLLOUT_LEASE_TOKEN)" || true; elif [ "$${lease_acquired}" = true ]; then printf "Canonical promotion started but did not verify; preserving the shared lease and token for manual recovery.\n" >&2; fi; rm -rf -- "$${temp_dir}"; rmdir "$(LOCAL_LOCK_DIR)" 2>/dev/null || true; exit $$status; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	manifest_digest="$$(shasum -a 256 "$(NETWORK_PLAN_MANIFEST)" | awk '{print $$1}')"; \
+	"$(ROLLOUT_LEASE)" acquire "$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" "$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${manifest_digest}" "$(ROLLOUT_LEASE_TOKEN)"; \
+	lease_acquired=true; \
 	./scripts/assert-packer-plugin.sh "$(PACKER)" "$(PACKER_PLUGIN_PATH)" >/dev/null; \
 	"$(PROVIDER_ROOT)/scripts/assert-foundation-backend.sh" "$(TERRAFORM_STATE_BUCKET)" "$(TERRAFORM_STATE_PREFIX)" .terraform; \
 	"$(PROVIDER_ROOT)/scripts/assert-foundation-workspace.sh" "$(TF)"; \
@@ -214,15 +228,6 @@ operator-canary-apply-build: operator-canary-toolchain-guard operator-canary-con
 		printf "Candidate image already exists; refusing replacement: %s.\n" "$(PACKER_IMAGE_NAME)" >&2; \
 		exit 1; \
 	fi; \
-	mkdir "$(LOCAL_LOCK_DIR)" 2>/dev/null || (printf "Another local operator-canary workflow holds %s.\n" "$(LOCAL_LOCK_DIR)"; exit 1); \
-	temp_dir="$$(mktemp -d ".operator-apply.$(ENV).XXXXXX")"; \
-	lease_acquired=false; \
-	promotion_started=false; \
-	cleanup() { status=$$?; if [ "$${lease_acquired}" = true ] && [ "$${promotion_started}" = false ]; then "$(ROLLOUT_LEASE)" release "$(GCLOUD)" "$(ROLLOUT_LEASE_TOKEN)" || true; elif [ "$${lease_acquired}" = true ]; then printf "Canonical promotion started but did not verify; preserving the shared lease and token for manual recovery.\n" >&2; fi; rm -rf -- "$${temp_dir}"; rmdir "$(LOCAL_LOCK_DIR)" 2>/dev/null || true; exit $$status; }; \
-	trap cleanup EXIT HUP INT TERM; \
-	manifest_digest="$$(shasum -a 256 "$(NETWORK_PLAN_MANIFEST)" | awk '{print $$1}')"; \
-	"$(ROLLOUT_LEASE)" acquire "$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" "$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${manifest_digest}" "$(ROLLOUT_LEASE_TOKEN)"; \
-	lease_acquired=true; \
 	"$(TF)" apply -input=false "$(NETWORK_PLAN)"; \
 	if $(tf_vars) "$(TF)" plan -input=false -compact-warnings -detailed-exitcode; then :; else \
 		printf "Post-apply drift check was not exactly clean; Packer will not run.\n" >&2; exit 1; \
@@ -233,8 +238,9 @@ operator-canary-apply-build: operator-canary-toolchain-guard operator-canary-con
 	fi; \
 	rm -f -- "$(PACKER_BUILD_MANIFEST)"; \
 	PACKER_PLUGIN_PATH="$(PACKER_PLUGIN_PATH)" "$(PACKER)" build -only=googlecompute.orch -parallel-builds=1 -on-error=cleanup $(packer_vars) .; \
-	./scripts/assert-packer-artifact.sh "$(PACKER_BUILD_MANIFEST)" "$(GCP_PROJECT_ID)" "$(PACKER_IMAGE_NAME)" "$(PACKER_IMAGE_FAMILY)" "$(ENV)" "$(PACKER_SOURCE_REVISION)"; \
+	./scripts/assert-packer-artifact.sh "$(PACKER_BUILD_MANIFEST)" "$(GCP_PROJECT_ID)" "$(PACKER_IMAGE_NAME)" "$(PACKER_IMAGE_FAMILY)" "$(ENV)" "$(PACKER_SOURCE_REVISION)" "$(PACKER_SOURCE_IMAGE)" "$(ROOT_ARTIFACT_LOCK_SHA256)"; \
 	./scripts/assert-built-image.sh "$(GCLOUD)" "$(GCP_PROJECT_ID)" "$(PACKER_IMAGE_NAME)" "$(PACKER_IMAGE_FAMILY)" "$(ENV)" "$(PACKER_SOURCE_REVISION)"; \
+	./scripts/smoke-built-image.sh "$(GCLOUD)" "$(GCP_PROJECT_ID)" "$(GCP_ZONE)" "$(PACKER_IMAGE_NAME)" "$(PACKER_NETWORK_NAME)" "$(PACKER_SUBNET_NAME)" "$(PACKER_SMOKE_MACHINE_TYPE)" "$(PACKER_DOCKER_VERSION)" "$(PACKER_NOMAD_VERSION)" "$(PACKER_CONSUL_VERSION)" "$(ENV)" "$(PACKER_SOURCE_REVISION)"; \
 	promotion_started=true; \
 	./scripts/promote-built-image.sh "$(GCLOUD)" "$(GCP_PROJECT_ID)" "$(PACKER_IMAGE_NAME)" "$(PACKER_IMAGE_FAMILY)" "$(PACKER_CANONICAL_IMAGE_FAMILY)" "$(ENV)" "$(PACKER_SOURCE_REVISION)"; \
 	promotion_started=false; \

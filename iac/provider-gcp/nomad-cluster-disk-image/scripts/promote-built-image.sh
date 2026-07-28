@@ -20,10 +20,11 @@ if ! jq -e \
   --arg project "${project_id}" \
   --arg image_name "${image_name}" \
   --arg candidate_family "${candidate_family}" \
+  --arg canonical_family "${canonical_family}" \
   --arg environment "${environment}" \
   --arg revision "${revision}" '
   .name == $image_name
-  and .family == $candidate_family
+  and (.family == $candidate_family or .family == $canonical_family)
   and .status == "READY"
   and .deprecated == null
   and .id != null
@@ -36,13 +37,20 @@ if ! jq -e \
   exit 1
 fi
 
+before_family="$(jq -er '.family' <<<"${before_json}")"
 before_id="$(jq -er '.id | tostring' <<<"${before_json}")"
 before_self_link="$(jq -er '.selfLink' <<<"${before_json}")"
 
-"${gcloud_bin}" compute images update "${image_name}" \
-  --project="${project_id}" \
-  --family="${canonical_family}" \
-  --quiet
+update_status=0
+if [[ "${before_family}" == "${candidate_family}" ]]; then
+  set +e
+  "${gcloud_bin}" compute images update "${image_name}" \
+    --project="${project_id}" \
+    --family="${canonical_family}" \
+    --quiet
+  update_status=$?
+  set -e
+fi
 
 after_json="$(describe_exact)"
 family_json="$(
@@ -79,5 +87,12 @@ if ! jq -e \
   exit 1
 fi
 
+if [[ "${before_family}" == "${canonical_family}" ]]; then
+  printf 'Canonical promotion was already complete and verified for exact image %s (%s).\n' \
+    "${image_name}" "${before_id}"
+elif [[ "${update_status}" -ne 0 ]]; then
+  printf 'Recovered an ambiguous image-family update; canonical state verifies exact image %s (%s).\n' \
+    "${image_name}" "${before_id}"
+fi
 printf 'Canonical family %s now resolves exactly to verified image %s (%s).\n' \
   "${canonical_family}" "${image_name}" "${before_id}"

@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 config_root="$(cd "${script_dir}/.." && pwd)"
+provider_root="$(cd "${config_root}/.." && pwd)"
 repo_root="$(cd "${config_root}/../../.." && pwd)"
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/operator-canary-test.XXXXXX")"
 trap 'rm -rf -- "${temp_dir}"' EXIT HUP INT TERM
@@ -183,6 +184,173 @@ if grep -Eq -- '(-auto-approve|-upgrade|(^|[[:space:]])-force)' \
   exit 1
 fi
 
+apply_recipe="$(
+  awk '
+    /^operator-canary-apply-build:/ { capture = 1 }
+    capture && /^\.PHONY: operator-canary-lease-inspect/ { exit }
+    capture { print }
+  ' "${config_root}/Makefile"
+)"
+assert_lease_first() {
+  local recipe="$1"
+  local acquire_line
+  local check_line
+  local check
+
+  acquire_line="$(
+    grep -nF '"$(ROLLOUT_LEASE)" acquire' <<<"${recipe}" |
+      cut -d: -f1
+  )"
+  [[ "${acquire_line}" =~ ^[0-9]+$ ]] || return 1
+
+  for check in \
+    './scripts/assert-packer-plugin.sh' \
+    'assert-foundation-backend.sh' \
+    'assert-foundation-workspace.sh' \
+    'assert-foundation-state-bucket.sh' \
+    '"$(PACKER_RESERVE_GUARD)"' \
+    './scripts/assert-live-capacity.sh' \
+    './scripts/network-plan-metadata.sh verify ' \
+    './scripts/assert-network-plan.sh'; do
+    check_line="$(grep -nF "${check}" <<<"${recipe}" | cut -d: -f1)"
+    [[ "${check_line}" =~ ^[0-9]+$ && "${check_line}" -gt "${acquire_line}" ]] ||
+      return 1
+  done
+}
+assert_lease_first "${apply_recipe}" || {
+  printf 'Final apply/build checks are not all guarded by the shared lease.\n' >&2
+  exit 1
+}
+adversarial_recipe="$(
+  sed '/"$(ROLLOUT_LEASE)" acquire/i\
+\t./scripts/assert-live-capacity.sh adversarial;' <<<"${apply_recipe}"
+)"
+if assert_lease_first "${adversarial_recipe}"; then
+  printf 'A live capacity check injected before lease acquisition passed ordering.\n' >&2
+  exit 1
+fi
+grep -F \
+  'test "$(TERRAFORM_STATE_BUCKET)" = "$(GCP_PROJECT_ID)-terraform-state"' \
+  "${config_root}/Makefile" >/dev/null || {
+  printf 'Operator canary does not enforce the canonical shared lock bucket.\n' >&2
+  exit 1
+}
+
+tampered_artifact_lock="${temp_dir}/root-artifacts.tampered.json"
+jq '.docker_ce.sha256 = "not-a-sha256"' \
+  "${config_root}/setup/root-artifacts.lock.json" \
+  >"${tampered_artifact_lock}"
+if "${script_dir}/assert-packer-config.sh" \
+  "${config_root}/main.pkr.hcl" \
+  "${config_root}/variables.pkr.hcl" \
+  "${tampered_artifact_lock}" >/dev/null 2>&1; then
+  printf 'Tampered root artifact identity unexpectedly passed.\n' >&2
+  exit 1
+fi
+if rg -n \
+  'get\.docker\.com|add-google-cloud-ops-agent-repo|git clone|CHECKSUM_URL' \
+  "${config_root}/main.pkr.hcl" \
+  "${repo_root}/iac/nomad-cluster-disk-image/setup" >/dev/null; then
+  printf 'Mutable or same-origin-checksum root input remains in the canary.\n' >&2
+  exit 1
+fi
+
+artifact_lock_sha="$(
+  shasum -a 256 "${config_root}/setup/root-artifacts.lock.json" |
+    awk '{print $1}'
+)"
+packer_manifest="${temp_dir}/packer-manifest.json"
+jq -n \
+  --arg lock_sha "${artifact_lock_sha}" '{
+  last_run_uuid: "build-uuid",
+  builds: [{
+    name: "orch",
+    builder_type: "googlecompute",
+    artifact_id: "test-project/candidate-image",
+    custom_data: {
+      environment: "dev",
+      image_family: "e2b-orch-dev-candidate",
+      image_name: "candidate-image",
+      source_image: "ubuntu-2404-noble-amd64-v20260723",
+      source_project: "ubuntu-os-cloud",
+      source_revision: "0123456789abcdef0123456789abcdef01234567",
+      root_input_lock_sha256: $lock_sha
+    }
+  }]
+}' >"${packer_manifest}"
+"${script_dir}/assert-packer-artifact.sh" \
+  "${packer_manifest}" test-project candidate-image \
+  e2b-orch-dev-candidate dev \
+  0123456789abcdef0123456789abcdef01234567 \
+  ubuntu-2404-noble-amd64-v20260723 "${artifact_lock_sha}" >/dev/null
+if "${script_dir}/assert-packer-artifact.sh" \
+  "${packer_manifest}" test-project candidate-image \
+  e2b-orch-dev-candidate dev \
+  0123456789abcdef0123456789abcdef01234567 \
+  ubuntu-2404-noble-amd64-v20260723 \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >/dev/null 2>&1; then
+  printf 'Packer manifest with the wrong root-input identity unexpectedly passed.\n' >&2
+  exit 1
+fi
+
+toolchain_terraform="${temp_dir}/toolchain-terraform"
+cat >"${toolchain_terraform}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "version" ]]
+printf '{"terraform_version":"1.7.5"}\n'
+EOF
+toolchain_packer="${temp_dir}/toolchain-packer"
+cat >"${toolchain_packer}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "version" ]]
+printf '0,,version,1.13.1\n'
+EOF
+toolchain_gcloud="${temp_dir}/toolchain-gcloud"
+cat >"${toolchain_gcloud}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "version" ]]
+printf '{"Google Cloud SDK":"534.0.0"}\n'
+EOF
+chmod 0755 \
+  "${toolchain_terraform}" "${toolchain_packer}" "${toolchain_gcloud}"
+make -C "${config_root}" operator-canary-toolchain-guard \
+  TF="${toolchain_terraform}" \
+  PACKER="${toolchain_packer}" \
+  GCLOUD="${toolchain_gcloud}" >/dev/null
+
+pin_probe="${temp_dir}/pin-probe.mk"
+cat >"${pin_probe}" <<EOF
+include ${config_root}/Makefile
+.PHONY: print-operator-pins
+print-operator-pins:
+	@printf '%s\\n' "\$(CONFIG_ROOT)|\$(EXPECTED_GCLOUD_VERSION)|\$(PACKER_SOURCE_IMAGE)|\$(PACKER_GATE_MAX_PLAN_AGE_SECONDS)|\$(ROOT_ARTIFACT_LOCK)|\$(POLICY_PATH)|\$(PACKER_SMOKE_MACHINE_TYPE)|\$(ROLLOUT_LEASE)|\$(origin tf_vars)|\$(origin packer_vars)|\$(origin metadata_context)"
+EOF
+resolved_pins="$(
+  make -s --no-print-directory -C "${config_root}" -f "${pin_probe}" \
+    print-operator-pins \
+    CURDIR=/tmp/attacker-root \
+    EXPECTED_GCLOUD_VERSION=577.0.0 \
+    PACKER_SOURCE_IMAGE=ubuntu-attacker-image \
+    PACKER_GATE_MAX_PLAN_AGE_SECONDS=999999 \
+    ROOT_ARTIFACT_LOCK=/tmp/attacker-lock.json \
+    POLICY_PATH=/tmp/attacker-policy.json \
+    PACKER_SMOKE_MACHINE_TYPE=n1-highmem-96 \
+    ROLLOUT_LEASE=/bin/true \
+    tf_vars=attacker \
+    packer_vars=attacker \
+    metadata_context=attacker
+)"
+expected_pins="${config_root}|534.0.0|ubuntu-2404-noble-amd64-v20260723|3600|${config_root}/setup/root-artifacts.lock.json|${provider_root}/topology/minimal-workload-policy.json|n1-standard-4|${provider_root}/scripts/rollout-mutation-lease.sh|override|override|override"
+if [[ "${resolved_pins}" != "${expected_pins}" ]]; then
+  printf 'Command-line values overrode repository-pinned canary inputs: %s\n' \
+    "${resolved_pins}" >&2
+  exit 1
+fi
+
 plugin_root="${temp_dir}/plugins"
 plugin_path="${plugin_root}/github.com/hashicorp/googlecompute/packer-plugin-googlecompute_v1.0.16_x5.0_linux_amd64"
 mkdir -p "$(dirname "${plugin_path}")"
@@ -272,10 +440,10 @@ elif [[ "$1 $2 $3" == "compute images describe" ]]; then
     deprecated: null,
     diskSizeGb: "10",
     id: $id,
-    name: "ubuntu-2404-noble-amd64-v20260517",
+    name: "ubuntu-2404-noble-amd64-v20260723",
     selfLink: (
       "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/"
-      + "ubuntu-2404-noble-amd64-v20260517"
+      + "ubuntu-2404-noble-amd64-v20260723"
     ),
     status: "READY"
   }'
@@ -304,7 +472,7 @@ metadata_env=(
   "PACKER_GATE_SUBNET_NAME=e2b-build-cluster-disk-image-subnetwork"
   "PACKER_GATE_CONSUL_VERSION=1.17.3"
   "PACKER_GATE_NOMAD_VERSION=1.8.4"
-  "PACKER_GATE_SOURCE_IMAGE=ubuntu-2404-noble-amd64-v20260517"
+  "PACKER_GATE_SOURCE_IMAGE=ubuntu-2404-noble-amd64-v20260723"
   "PACKER_GATE_IMAGE_NAME=e2b-orch-dev-candidate-${source_revision:0:12}"
   "PACKER_GATE_IMAGE_FAMILY=e2b-orch-dev-candidate"
   "PACKER_GATE_CANONICAL_IMAGE_FAMILY=e2b-orch"
@@ -382,10 +550,7 @@ if TF_CLI_ARGS_plan=-destroy PACKER_PLUGIN_PATH="${plugin_root}" \
   exit 1
 fi
 
-quota_policy="${temp_dir}/quota-policy.json"
-jq '.expected_peak_usage.e2_vcpus = 14' \
-  "${repo_root}/iac/provider-gcp/topology/minimal-workload-policy.json" \
-  >"${quota_policy}"
+quota_policy="${repo_root}/iac/provider-gcp/topology/minimal-workload-policy.json"
 fake_quota_gcloud="${temp_dir}/quota-gcloud"
 cat >"${fake_quota_gcloud}" <<'EOF'
 #!/usr/bin/env bash
@@ -396,12 +561,11 @@ if [[ "$1 $2 $3" == "compute project-info describe" ]]; then
     quotas: [{metric: "CPUS_ALL_REGIONS", limit: 64, usage: 0}]
   }'
 elif [[ "$1 $2 $3" == "compute regions describe" ]]; then
-  e2_limit="${FAKE_E2_LIMIT:-24}"
-  jq -n --argjson e2_limit "${e2_limit}" '{
+  cpu_limit="${FAKE_CPU_LIMIT:-200}"
+  jq -n --argjson cpu_limit "${cpu_limit}" '{
     name: "us-east4",
     quotas: [
-      {metric: "CPUS", limit: 200, usage: 0},
-      {metric: "E2_CPUS", limit: $e2_limit, usage: 0},
+      {metric: "CPUS", limit: $cpu_limit, usage: 0},
       {metric: "INSTANCES", limit: 32, usage: 0},
       {metric: "SSD_TOTAL_GB", limit: 500, usage: 0},
       {metric: "DISKS_TOTAL_GB", limit: 4096, usage: 0},
@@ -416,12 +580,92 @@ EOF
 chmod 0755 "${fake_quota_gcloud}"
 "${script_dir}/assert-live-capacity.sh" \
   "${quota_policy}" "${fake_quota_gcloud}" test-project us-east4 >/dev/null
-if FAKE_E2_LIMIT=13 "${script_dir}/assert-live-capacity.sh" \
+if FAKE_CPU_LIMIT=29 "${script_dir}/assert-live-capacity.sh" \
   "${quota_policy}" "${fake_quota_gcloud}" test-project us-east4 \
   >/dev/null 2>&1; then
-  printf 'Insufficient E2 family headroom unexpectedly passed.\n' >&2
+  printf 'Insufficient regional CPU headroom unexpectedly passed.\n' >&2
   exit 1
 fi
+
+smoke_state="${temp_dir}/smoke-instance"
+smoke_log="${temp_dir}/smoke-log"
+smoke_gcloud="${temp_dir}/smoke-gcloud"
+cat >"${smoke_gcloud}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "compute images describe" ]]; then
+  jq -n --arg revision "0123456789abcdef0123456789abcdef01234567" '{
+    name: "candidate-image",
+    status: "READY",
+    deprecated: null,
+    id: "123456",
+    selfLink: (
+      "https://www.googleapis.com/compute/v1/projects/test-project/global/images/"
+      + "candidate-image"
+    ),
+    labels: {
+      monad_environment: "dev",
+      monad_revision: $revision
+    }
+  }'
+elif [[ "$1 $2 $3" == "compute instances describe" ]]; then
+  [[ -f "${FAKE_SMOKE_STATE}" ]] || exit 1
+  printf 'monad-smoke\n'
+elif [[ "$1 $2 $3" == "compute instances create" ]]; then
+  printf '%s\n' "$*" >>"${FAKE_SMOKE_LOG}"
+  for argument in "$@"; do
+    case "${argument}" in
+      --metadata-from-file=startup-script=*)
+        startup_script="${argument#--metadata-from-file=startup-script=}"
+        grep -F 'docker info' "${startup_script}" >/dev/null
+        grep -F 'nomad agent -dev' "${startup_script}" >/dev/null
+        grep -F 'consul agent -dev' "${startup_script}" >/dev/null
+        grep -F 'test -c /dev/kvm' "${startup_script}" >/dev/null
+        ;;
+    esac
+  done
+  : >"${FAKE_SMOKE_STATE}"
+elif [[ "$1 $2 $3" == "compute instances get-serial-port-output" ]]; then
+  printf '%s:%s\n' \
+    "${FAKE_SMOKE_RESULT:-MONAD_IMAGE_SMOKE_PASS}" \
+    "0123456789abcdef0123456789abcdef01234567"
+elif [[ "$1 $2 $3" == "compute instances delete" ]]; then
+  rm -f -- "${FAKE_SMOKE_STATE}"
+else
+  exit 1
+fi
+EOF
+chmod 0755 "${smoke_gcloud}"
+export FAKE_SMOKE_STATE="${smoke_state}"
+export FAKE_SMOKE_LOG="${smoke_log}"
+PACKER_SMOKE_MAX_ATTEMPTS=2 PACKER_SMOKE_POLL_SECONDS=0 \
+  "${script_dir}/smoke-built-image.sh" \
+    "${smoke_gcloud}" test-project us-east4-a candidate-image \
+    e2b-build-cluster-disk-image \
+    e2b-build-cluster-disk-image-subnetwork n1-standard-4 \
+    29.6.2 1.8.4 1.17.3 dev \
+    0123456789abcdef0123456789abcdef01234567 >/dev/null
+[[ ! -e "${smoke_state}" ]]
+grep -F -- '--image=candidate-image' "${smoke_log}" >/dev/null
+grep -F -- '--image-project=test-project' "${smoke_log}" >/dev/null
+grep -F -- '--no-address' "${smoke_log}" >/dev/null
+grep -F -- '--no-service-account' "${smoke_log}" >/dev/null
+grep -F -- '--no-scopes' "${smoke_log}" >/dev/null
+grep -F -- '--enable-nested-virtualization' "${smoke_log}" >/dev/null
+
+: >"${smoke_log}"
+if FAKE_SMOKE_RESULT=MONAD_IMAGE_SMOKE_FAIL \
+  PACKER_SMOKE_MAX_ATTEMPTS=1 PACKER_SMOKE_POLL_SECONDS=0 \
+  "${script_dir}/smoke-built-image.sh" \
+    "${smoke_gcloud}" test-project us-east4-a candidate-image \
+    e2b-build-cluster-disk-image \
+    e2b-build-cluster-disk-image-subnetwork n1-standard-4 \
+    29.6.2 1.8.4 1.17.3 dev \
+    0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1; then
+  printf 'Failed exact-image service smoke unexpectedly passed.\n' >&2
+  exit 1
+fi
+[[ ! -e "${smoke_state}" ]]
 
 promotion_state="${temp_dir}/promotion-family"
 promotion_log="${temp_dir}/promotion-log"
@@ -463,6 +707,9 @@ elif [[ "$1 $2 $3" == "compute images update" ]]; then
         ;;
     esac
   done
+  if [[ "${FAKE_UPDATE_ERROR_AFTER_APPLY:-false}" == "true" ]]; then
+    exit 1
+  fi
 elif [[ "$1 $2 $3" == "compute images describe-from-family" ]]; then
   if [[ "${FAKE_BAD_FAMILY_HEAD:-false}" == "true" ]]; then
     image_json "e2b-orch" "unverified-image"
@@ -480,6 +727,21 @@ export FAKE_PROMOTION_LOG="${promotion_log}"
   "${promotion_gcloud}" test-project candidate-image \
   e2b-orch-dev-candidate e2b-orch dev \
   0123456789abcdef0123456789abcdef01234567 >/dev/null
+[[ "$(cat "${promotion_state}")" == "e2b-orch" ]]
+[[ "$(wc -l <"${promotion_log}" | tr -d ' ')" == "1" ]]
+"${script_dir}/promote-built-image.sh" \
+  "${promotion_gcloud}" test-project candidate-image \
+  e2b-orch-dev-candidate e2b-orch dev \
+  0123456789abcdef0123456789abcdef01234567 >/dev/null
+[[ "$(wc -l <"${promotion_log}" | tr -d ' ')" == "1" ]]
+
+printf 'e2b-orch-dev-candidate' >"${promotion_state}"
+: >"${promotion_log}"
+FAKE_UPDATE_ERROR_AFTER_APPLY=true \
+  "${script_dir}/promote-built-image.sh" \
+    "${promotion_gcloud}" test-project candidate-image \
+    e2b-orch-dev-candidate e2b-orch dev \
+    0123456789abcdef0123456789abcdef01234567 >/dev/null
 [[ "$(cat "${promotion_state}")" == "e2b-orch" ]]
 [[ "$(wc -l <"${promotion_log}" | tr -d ' ')" == "1" ]]
 

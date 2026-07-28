@@ -116,6 +116,7 @@ configuration_sha256() {
     "${config_root}/main.pkr.hcl"
     "${config_root}/main.tf"
     "${config_root}/setup/gc-ops.config.yaml"
+    "${config_root}/setup/root-artifacts.lock.json"
     "${config_root}/variables.pkr.hcl"
     "${config_root}/variables.tf"
     "${repo_root}/.tool-versions"

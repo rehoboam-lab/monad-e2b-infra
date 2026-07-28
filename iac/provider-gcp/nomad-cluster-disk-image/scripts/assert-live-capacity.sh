@@ -35,7 +35,6 @@ if ! jq -e \
   | .region as $region_doc
   | quota($project_doc.quotas; "CPUS_ALL_REGIONS") as $global_cpu
   | quota($region_doc.quotas; "CPUS") as $regional_cpu
-  | quota($region_doc.quotas; "E2_CPUS") as $e2_cpu
   | quota($region_doc.quotas; "INSTANCES") as $instances
   | quota($region_doc.quotas; "SSD_TOTAL_GB") as $ssd
   | quota($region_doc.quotas; "DISKS_TOTAL_GB") as $standard
@@ -47,7 +46,6 @@ if ! jq -e \
     and $region_doc.name == $region
     and (($global_cpu.limit - $global_cpu.usage) >= $peak.global_vcpus)
     and (($regional_cpu.limit - $regional_cpu.usage) >= $peak.global_vcpus)
-    and (($e2_cpu.limit - $e2_cpu.usage) >= $peak.e2_vcpus)
     and (($instances.limit - $instances.usage) >= $peak.instances)
     and (($ssd.limit - $ssd.usage) >= $peak.pd_ssd_gb)
     and (($standard.limit - $standard.usage) >= $peak.pd_standard_gb)
@@ -71,7 +69,6 @@ if ! jq -e \
         $region.quotas[]?
         | select(
           .metric == "CPUS"
-          or .metric == "E2_CPUS"
           or .metric == "INSTANCES"
           or .metric == "SSD_TOTAL_GB"
           or .metric == "DISKS_TOTAL_GB"
