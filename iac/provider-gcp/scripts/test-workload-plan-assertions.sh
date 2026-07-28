@@ -5,14 +5,42 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 assertion_script="${script_dir}/assert-workload-plan.sh"
 packer_assertion_script="${script_dir}/assert-packer-reserve.sh"
 fixture="${script_dir}/testdata/minimal-workload-plan.json"
+cloud_sql_fixture="${script_dir}/testdata/cloud-sql-workload-resources.json"
 policy="${script_dir}/../topology/minimal-workload-policy.json"
 packer_template="${script_dir}/../nomad-cluster-disk-image/main.pkr.hcl"
+cloud_sql_config="${script_dir}/../cloud-sql.tf"
+reverse_proxy_store="${script_dir}/../../../packages/docker-reverse-proxy/internal/handlers/store.go"
+dashboard_api_main="${script_dir}/../../../packages/dashboard-api/main.go"
+database_migrator="${script_dir}/../../../packages/db/scripts/migrator.go"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "${test_dir}"' EXIT
 
 fake_terraform="${test_dir}/terraform"
 cp "${script_dir}/testdata/fake-terraform.sh" "${fake_terraform}"
 chmod 0700 "${fake_terraform}"
+
+jq --slurpfile cloud_sql "${cloud_sql_fixture}" \
+  '.resource_changes += $cloud_sql[0]' \
+  "${fixture}" >"${test_dir}/minimal-with-cloud-sql.json"
+fixture="${test_dir}/minimal-with-cloud-sql.json"
+
+grep -F 'ssl_mode                                      = "ENCRYPTED_ONLY"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F '"postgresql://%s:%s@%s:5432/%s?sslmode=require"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'password = random_password.cloud_sql_operator_canary.result' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'secret = module.init.postgres_connection_string_secret_name' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'member  = "serviceAccount:${google_project_service_identity.cloud_sql.email}"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'member  = "serviceAccount:${google_project_service_identity.service_networking.email}"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'prevent_destroy = true' \
+  "${cloud_sql_config}" >/dev/null
+test "$(grep -Fc 'pool.WithMaxConnections(3)' "${reverse_proxy_store}")" -eq 2
+test "$(grep -Fc 'pool.WithMaxConnections(8)' "${dashboard_api_main}")" -eq 2
+grep -F 'poolConfig.MaxConns = 4' "${database_migrator}" >/dev/null
 
 expect_failure() {
   local name="$1"
@@ -357,6 +385,248 @@ expect_failure \
   "unknown-resource" \
   "unexpected_quota_resources must be empty." \
   "${test_dir}/unknown-resource.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.operator_canary")
+    | .change.after.settings[0].ip_configuration[0].ssl_mode
+  ) = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
+' "${fixture}" >"${test_dir}/cloud-sql-plaintext.json"
+expect_failure \
+  "cloud-sql-plaintext" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-plaintext.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.operator_canary")
+    | .change.after.settings[0].ip_configuration[0].ipv4_enabled
+  ) = true
+' "${fixture}" >"${test_dir}/cloud-sql-public-ip.json"
+expect_failure \
+  "cloud-sql-public-ip" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-public-ip.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.operator_canary")
+    | .change.after.settings[0].backup_configuration[0].point_in_time_recovery_enabled
+  ) = false
+' "${fixture}" >"${test_dir}/cloud-sql-no-pitr.json"
+expect_failure \
+  "cloud-sql-no-pitr" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-no-pitr.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.operator_canary")
+    | .change.after.deletion_protection
+  ) = false
+' "${fixture}" >"${test_dir}/cloud-sql-no-delete-protection.json"
+expect_failure \
+  "cloud-sql-no-delete-protection" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-no-delete-protection.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.db_max_open_connections
+  ) = 7
+  |
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.maximum_concurrent_connections
+  ) = 20
+' "${fixture}" >"${test_dir}/cloud-sql-pool-over-budget.json"
+expect_failure \
+  "cloud-sql-pool-over-budget" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-pool-over-budget.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.api_server_count
+  ) = 2
+  |
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.maximum_concurrent_connections
+  ) = 28
+' "${fixture}" >"${test_dir}/cloud-sql-api-replica-drift.json"
+expect_failure \
+  "cloud-sql-api-replica-drift" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-api-replica-drift.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.dashboard_api_count
+  ) = 1
+  |
+  (
+    .resource_changes[]
+    | select(.address == "terraform_data.cloud_sql_connection_budget")
+    | .change.after.input.maximum_concurrent_connections
+  ) = 35
+' "${fixture}" >"${test_dir}/cloud-sql-dashboard-enabled.json"
+expect_failure \
+  "cloud-sql-dashboard-enabled" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-dashboard-enabled.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_service_networking_connection.cloud_sql")
+    | .change.after.network
+  ) = "projects/operator-canary/global/networks/wrong"
+' "${fixture}" >"${test_dir}/cloud-sql-network-mismatch.json"
+expect_failure \
+  "cloud-sql-network-mismatch" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-network-mismatch.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database.operator_canary")
+    | .change.after.project
+  ) = "wrong-project"
+' "${fixture}" >"${test_dir}/cloud-sql-project-mismatch.json"
+expect_failure \
+  "cloud-sql-project-mismatch" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-project-mismatch.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_project_service_identity.cloud_sql")
+    | .change.after.email
+  ) = "service-agent@operator-canary.iam.gserviceaccount.com"
+  |
+  del(
+    .resource_changes[]
+    | select(.address == "google_project_service_identity.cloud_sql")
+    | .change.after_unknown.email
+  )
+  |
+  (
+    .resource_changes[]
+    | select(.address == "google_project_iam_member.cloud_sql_service_agent")
+    | .change.after.member
+  ) = "serviceAccount:wrong@operator-canary.iam.gserviceaccount.com"
+  |
+  del(
+    .resource_changes[]
+    | select(.address == "google_project_iam_member.cloud_sql_service_agent")
+    | .change.after_unknown.member
+  )
+' "${fixture}" >"${test_dir}/cloud-sql-iam-member-mismatch.json"
+expect_failure \
+  "cloud-sql-iam-member-mismatch" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-iam-member-mismatch.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_user.operator_canary")
+    | .change.after.password
+  ) = "password"
+  |
+  del(
+    .resource_changes[]
+    | select(.address == "google_sql_user.operator_canary")
+    | .change.after_unknown.password
+  )
+' "${fixture}" >"${test_dir}/cloud-sql-literal-password.json"
+expect_failure \
+  "cloud-sql-literal-password" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-literal-password.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_secret_manager_secret_version.postgres_connection_string")
+    | .change.after.secret
+  ) = "projects/other/secrets/hostile"
+  |
+  (
+    .resource_changes[]
+    | select(.address == "google_secret_manager_secret_version.postgres_connection_string")
+    | .change.after.secret_data
+  ) = "plaintext"
+  |
+  del(
+    .resource_changes[]
+    | select(.address == "google_secret_manager_secret_version.postgres_connection_string")
+    | .change.after_unknown.secret_data
+  )
+' "${fixture}" >"${test_dir}/cloud-sql-hostile-secret.json"
+expect_failure \
+  "cloud-sql-hostile-secret" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-hostile-secret.json"
+
+jq '
+  .resource_changes += [
+    {
+      "address": "google_sql_database_instance.unreviewed",
+      "mode": "managed",
+      "type": "google_sql_database_instance",
+      "name": "unreviewed",
+      "change": {
+        "actions": ["create"],
+        "after": {}
+      }
+    }
+  ]
+' "${fixture}" >"${test_dir}/unknown-cloud-sql.json"
+expect_failure \
+  "unknown-cloud-sql" \
+  "unknown_cloud_sql_resources must be empty." \
+  "${test_dir}/unknown-cloud-sql.json"
+
+jq '
+  .resource_changes |= map(
+    select(
+      .address
+      != "google_secret_manager_secret_version.postgres_connection_string"
+    )
+  )
+' "${fixture}" >"${test_dir}/missing-cloud-sql-secret-version.json"
+expect_failure \
+  "missing-cloud-sql-secret-version" \
+  "missing_or_duplicate_cloud_sql_resources must be empty." \
+  "${test_dir}/missing-cloud-sql-secret-version.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.operator_canary")
+    | .change.actions
+  ) = ["delete"]
+' "${fixture}" >"${test_dir}/destructive-cloud-sql.json"
+expect_failure \
+  "destructive-cloud-sql" \
+  "destructive_cloud_sql_resources must be empty." \
+  "${test_dir}/destructive-cloud-sql.json"
 
 jq '.quota_limits.global_vcpus = 64' \
   "${policy}" >"${test_dir}/quota-policy-drift.json"
