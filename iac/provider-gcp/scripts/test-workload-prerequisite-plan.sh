@@ -63,10 +63,13 @@ jq -n \
             actions: ["create"],
             before: null,
             after: {
-              member: "serviceAccount:e2b-infra@operator-canary.iam.gserviceaccount.com",
+              member: "serviceAccount:e2b-infra-instances@operator-canary.iam.gserviceaccount.com",
+              location: "us-east4",
+              project: "operator-canary",
+              repository: "e2b-custom-environments",
               role: "roles/artifactregistry.repoAdmin"
             },
-            after_unknown: {repository: true}
+            after_unknown: {}
           }
         },
         {
@@ -160,8 +163,8 @@ jq -n \
           change: {
             actions: ["create"],
             before: null,
-            after: {rfc3339: null},
-            after_unknown: {rfc3339: true}
+            after: {rfc3339: null, unix: null},
+            after_unknown: {rfc3339: true, unix: true}
           }
         },
         {
@@ -210,31 +213,112 @@ jq -n \
         }
       },
       root_module: {
-        resources: [{
-          address: "google_artifact_registry_repository.custom_environments_repository",
-          mode: "managed",
-          type: "google_artifact_registry_repository",
-          name: "custom_environments_repository",
-          provider_config_key: "google"
-        }]
+        resources: [
+          {
+            address: "google_artifact_registry_repository.custom_environments_repository",
+            mode: "managed",
+            type: "google_artifact_registry_repository",
+            name: "custom_environments_repository",
+            provider_config_key: "google",
+            expressions: {
+              location: {references: ["var.gcp_region"]},
+              project: {references: ["var.gcp_project_id"]}
+            }
+          },
+          {
+            address: "google_artifact_registry_repository_iam_member.custom_environments_repository_member",
+            mode: "managed",
+            type: "google_artifact_registry_repository_iam_member",
+            name: "custom_environments_repository_member",
+            provider_config_key: "google",
+            expressions: {
+              location: {references: ["var.gcp_region"]},
+              member: {
+                references: ["module.init.service_account_email", "module.init"]
+              },
+              project: {references: ["var.gcp_project_id"]},
+              repository: {
+                references: [
+                  "google_artifact_registry_repository.custom_environments_repository.repository_id",
+                  "google_artifact_registry_repository.custom_environments_repository"
+                ]
+              }
+            }
+          },
+          {
+            address: "google_secret_manager_secret_version.postgres_connection_string",
+            mode: "managed",
+            type: "google_secret_manager_secret_version",
+            name: "postgres_connection_string",
+            provider_config_key: "google",
+            expressions: {
+              secret: {
+                references: [
+                  "module.init.postgres_connection_string_secret_name",
+                  "module.init"
+                ]
+              }
+            }
+          },
+          {
+            address: "google_secret_manager_secret_version.postgres_read_replica_connection_string",
+            mode: "managed",
+            type: "google_secret_manager_secret_version",
+            name: "postgres_read_replica_connection_string",
+            provider_config_key: "google",
+            expressions: {
+              secret: {
+                references: [
+                  "google_secret_manager_secret.postgres_read_replica_connection_string.name",
+                  "google_secret_manager_secret.postgres_read_replica_connection_string"
+                ]
+              }
+            }
+          },
+          {
+            address: "google_secret_manager_secret_version.sandbox_access_token_hash_seed",
+            mode: "managed",
+            type: "google_secret_manager_secret_version",
+            name: "sandbox_access_token_hash_seed",
+            provider_config_key: "google",
+            expressions: {
+              secret: {
+                references: [
+                  "google_secret_manager_secret.sandbox_access_token_hash_seed.id",
+                  "google_secret_manager_secret.sandbox_access_token_hash_seed"
+                ]
+              },
+              secret_data: {
+                references: [
+                  "random_password.sandbox_access_token_hash_seed.result",
+                  "random_password.sandbox_access_token_hash_seed"
+                ]
+              }
+            }
+          }
+        ]
       }
     }
   }
   ' >"${test_dir}/reviewed.json"
 
 run_assertion() {
+  local fixture="$1"
+  local policy_path="${2:-${policy}}"
+
   WORKLOAD_GCP_PROJECT_ID=operator-canary \
   WORKLOAD_GCP_REGION=us-east4 \
   WORKLOAD_PREFIX=e2b- \
-    "${assertion_script}" "$1" "${fake_terraform}" "${policy}"
+    "${assertion_script}" "${fixture}" "${fake_terraform}" "${policy_path}"
 }
 
 expect_failure() {
   local name="$1"
   local expected_message="$2"
   local fixture="$3"
+  local policy_path="${4:-${policy}}"
 
-  if run_assertion "${fixture}" >"${test_dir}/${name}.out" 2>&1; then
+  if run_assertion "${fixture}" "${policy_path}" >"${test_dir}/${name}.out" 2>&1; then
     printf 'Expected prerequisite fixture %s to fail.\n' "${name}" >&2
     exit 1
   fi
@@ -359,6 +443,96 @@ jq '
     .resource_changes[]
     | select(
         .address
+        == "google_artifact_registry_repository.custom_environments_repository"
+      )
+    | .change.after.location
+  ) = "us-west1"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-repository-location.json"
+expect_failure \
+  wrong-repository-location \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-repository-location.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(
+        .address
+        == "google_artifact_registry_repository_iam_member.custom_environments_repository_member"
+      )
+    | .change.after.member
+  ) = "serviceAccount:attacker@operator-canary.iam.gserviceaccount.com"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-repository-member.json"
+expect_failure \
+  wrong-repository-member \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-repository-member.json"
+
+jq '
+  (
+    .configuration.root_module.resources[]
+    | select(
+        .address
+        == "google_artifact_registry_repository_iam_member.custom_environments_repository_member"
+      )
+    | .expressions.repository.references
+  ) = ["google_artifact_registry_repository.attacker.name"]
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-repository-binding.json"
+expect_failure \
+  wrong-repository-binding \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-repository-binding.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(
+        .address
+        == "google_secret_manager_secret.postgres_read_replica_connection_string"
+      )
+    | .change.after.project
+  ) = "attacker-project"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-read-secret-project.json"
+expect_failure \
+  wrong-read-secret-project \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-read-secret-project.json"
+
+jq '
+  (
+    .configuration.root_module.resources[]
+    | select(
+        .address
+        == "google_secret_manager_secret_version.postgres_read_replica_connection_string"
+      )
+    | .expressions.secret.references
+  ) = ["google_secret_manager_secret.attacker.name"]
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-read-secret-binding.json"
+expect_failure \
+  wrong-read-secret-binding \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-read-secret-binding.json"
+
+jq '
+  (
+    .configuration.root_module.resources[]
+    | select(
+        .address
+        == "google_secret_manager_secret_version.postgres_connection_string"
+      )
+    | .expressions.secret.references
+  ) = ["module.attacker.secret_name"]
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-connection-secret-binding.json"
+expect_failure \
+  wrong-connection-secret-binding \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-connection-secret-binding.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(
+        .address
         == "google_secret_manager_secret_version.sandbox_access_token_hash_seed"
       )
     | .change.after_sensitive.secret_data
@@ -372,6 +546,63 @@ expect_failure \
 jq '
   (
     .resource_changes[]
+    | select(
+        .address
+        == "google_secret_manager_secret.sandbox_access_token_hash_seed"
+      )
+    | .change.after.project
+  ) = "attacker-project"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-seed-secret-project.json"
+expect_failure \
+  wrong-seed-secret-project \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-seed-secret-project.json"
+
+jq '
+  (
+    .configuration.root_module.resources[]
+    | select(
+        .address
+        == "google_secret_manager_secret_version.sandbox_access_token_hash_seed"
+      )
+    | .expressions.secret.references
+  ) = ["google_secret_manager_secret.attacker.id"]
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-seed-secret-binding.json"
+expect_failure \
+  wrong-seed-secret-binding \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-seed-secret-binding.json"
+
+jq '
+  (
+    .configuration.root_module.resources[]
+    | select(
+        .address
+        == "google_secret_manager_secret_version.sandbox_access_token_hash_seed"
+      )
+    | .expressions.secret_data.references
+  ) = ["random_password.attacker.result"]
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-seed-data-binding.json"
+expect_failure \
+  wrong-seed-data-binding \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/wrong-seed-data-binding.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "time_static.volume_token_generation")
+    | .change.after_unknown.unix
+  ) = false
+' "${test_dir}/reviewed.json" >"${test_dir}/known-volume-time-unix.json"
+expect_failure \
+  known-volume-time-unix \
+  "non-Cloud-SQL prerequisite identity" \
+  "${test_dir}/known-volume-time-unix.json"
+
+jq '
+  (
+    .resource_changes[]
     | select(.address == "google_sql_database_instance.operator_canary")
     | .change.after.region
   ) = "us-west1"
@@ -380,5 +611,14 @@ expect_failure \
   wrong-sql-region \
   "invalid_cloud_sql_resources must be empty" \
   "${test_dir}/wrong-sql-region.json"
+
+jq '
+  .expected_cloud_sql.application_connection_budget = 99
+' "${policy}" >"${test_dir}/loose-cloud-sql-policy.json"
+expect_failure \
+  loose-cloud-sql-policy \
+  "Cloud SQL policy must match the exact reviewed contract" \
+  "${test_dir}/reviewed.json" \
+  "${test_dir}/loose-cloud-sql-policy.json"
 
 printf 'Workload prerequisite plan assertions passed.\n'
