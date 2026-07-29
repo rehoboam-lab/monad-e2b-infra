@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	authdb "github.com/e2b-dev/infra/packages/db/pkg/auth"
 	authqueries "github.com/e2b-dev/infra/packages/db/pkg/auth/queries"
@@ -27,10 +28,11 @@ import (
 const (
 	defaultSecretPrefix = "e2b-sdk-canary-api-key"
 	defaultTier         = "base_v1"
-	stateVersion        = 1
+	stateVersion        = 2
 )
 
 var secretIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var canarySuffixPattern = regexp.MustCompile(`^[0-9]{8}t[0-9]{6}z-[a-f0-9]{8}$`)
 
 type config struct {
 	databaseURL  string
@@ -46,6 +48,7 @@ type bootstrapState struct {
 	Version  int        `json:"version"`
 	Project  string     `json:"project"`
 	SecretID string     `json:"secret_id"`
+	Suffix   string     `json:"suffix"`
 	TeamID   uuid.UUID  `json:"team_id"`
 	APIKeyID *uuid.UUID `json:"api_key_id,omitempty"`
 }
@@ -126,6 +129,7 @@ func bootstrap(ctx context.Context, cfg config) error {
 		Version:  stateVersion,
 		Project:  cfg.project,
 		SecretID: secretID,
+		Suffix:   suffix,
 		TeamID:   uuid.New(),
 	}
 	if err := createStateFile(cfg.statePath, state); err != nil {
@@ -254,6 +258,13 @@ func cleanup(ctx context.Context, cfg config) error {
 }
 
 func reconcile(ctx context.Context, cfg config, state bootstrapState) error {
+	secretCfg := cfg
+	secretCfg.project = state.Project
+	secretExists, err := inspectCanarySecret(ctx, secretCfg, state)
+	if err != nil {
+		return err
+	}
+
 	db, err := authdb.NewClient(ctx, cfg.databaseURL)
 	if err != nil {
 		return errors.New("could not connect to the canary database for cleanup")
@@ -272,6 +283,9 @@ func reconcile(ctx context.Context, cfg config, state bootstrapState) error {
 		}
 	}()
 
+	if err := verifyCanaryDatabaseIdentity(ctx, tx, state); err != nil {
+		return err
+	}
 	if state.APIKeyID != nil {
 		_, err := queries.DeleteTeamAPIKey(ctx, authqueries.DeleteTeamAPIKeyParams{
 			ID:     *state.APIKeyID,
@@ -289,19 +303,57 @@ func reconcile(ctx context.Context, cfg config, state bootstrapState) error {
 	}
 	committed = true
 
-	secretCfg := cfg
-	secretCfg.project = state.Project
-	exists, err := secretExists(ctx, secretCfg, state.SecretID)
-	if err != nil {
-		return err
-	}
-	if exists {
+	if secretExists {
 		if err := deleteSecret(ctx, secretCfg, state.SecretID); err != nil {
 			return errors.New("could not delete the canary Secret Manager secret")
 		}
 	}
 
 	return nil
+}
+
+func verifyCanaryDatabaseIdentity(ctx context.Context, tx pgx.Tx, state bootstrapState) error {
+	var email string
+	var name string
+	var slug string
+	err := tx.QueryRow(
+		ctx,
+		`SELECT email, name, slug FROM public.teams WHERE id = $1::uuid FOR UPDATE`,
+		state.TeamID,
+	).Scan(&email, &name, &slug)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("could not inspect the canary team before cleanup")
+	}
+	if err == nil && !canaryTeamIdentityMatches(state.Suffix, email, name, slug) {
+		return errors.New("refusing cleanup: persisted team ID is not the generated canary team")
+	}
+
+	if state.APIKeyID == nil {
+		return nil
+	}
+
+	var keyTeamID uuid.UUID
+	var keyName string
+	err = tx.QueryRow(
+		ctx,
+		`SELECT team_id, name FROM public.team_api_keys WHERE id = $1::uuid FOR UPDATE`,
+		*state.APIKeyID,
+	).Scan(&keyTeamID, &keyName)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("could not inspect the canary API key before cleanup")
+	}
+	if err == nil &&
+		(keyTeamID != state.TeamID || keyName != "Monad SDK canary "+state.Suffix) {
+		return errors.New("refusing cleanup: persisted API-key ID is not owned by the generated canary team")
+	}
+
+	return nil
+}
+
+func canaryTeamIdentityMatches(suffix string, email string, name string, slug string) bool {
+	return email == "monad-sdk-canary+"+suffix+"@example.invalid" &&
+		name == "Monad SDK canary "+suffix &&
+		slug == "monad-sdk-canary-"+suffix
 }
 
 func createStateFile(path string, state bootstrapState) error {
@@ -424,6 +476,10 @@ func readStateFile(path string) (bootstrapState, error) {
 		return bootstrapState{}, errors.New("canary reconciliation state has no project")
 	case !secretIDPattern.MatchString(state.SecretID):
 		return bootstrapState{}, errors.New("canary reconciliation state has an invalid secret ID")
+	case !canarySuffixPattern.MatchString(state.Suffix):
+		return bootstrapState{}, errors.New("canary reconciliation state has an invalid suffix")
+	case !strings.HasSuffix(state.SecretID, "-"+state.Suffix):
+		return bootstrapState{}, errors.New("canary reconciliation state secret does not match its suffix")
 	case state.TeamID == uuid.Nil:
 		return bootstrapState{}, errors.New("canary reconciliation state has no team ID")
 	case state.APIKeyID != nil && *state.APIKeyID == uuid.Nil:
@@ -502,17 +558,23 @@ func deleteSecret(ctx context.Context, cfg config, secretID string) error {
 	return cmd.Run()
 }
 
-func secretExists(ctx context.Context, cfg config, secretID string) (bool, error) {
+type secretDescription struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels"`
+}
+
+func inspectCanarySecret(ctx context.Context, cfg config, state bootstrapState) (bool, error) {
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd := gcloudCommand(
 		ctx,
 		cfg,
-		"secrets", "describe", secretID,
+		"secrets", "describe", state.SecretID,
 		"--project", cfg.project,
-		"--format=value(name)",
+		"--format=json(name,labels)",
 		"--quiet",
 	)
-	cmd.Stdout = io.Discard
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
@@ -521,6 +583,17 @@ func secretExists(ctx context.Context, cfg config, secretID string) (bool, error
 			return false, nil
 		}
 		return false, errors.New("could not inspect the canary Secret Manager secret")
+	}
+
+	var description secretDescription
+	decoder := json.NewDecoder(io.LimitReader(&stdout, 4097))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&description); err != nil {
+		return false, errors.New("could not decode the canary Secret Manager identity")
+	}
+	if description.Labels["purpose"] != "monad-sdk-canary" ||
+		!strings.HasSuffix(description.Name, "/secrets/"+state.SecretID) {
+		return false, errors.New("refusing cleanup: persisted secret is not labelled as the generated canary secret")
 	}
 
 	return true, nil

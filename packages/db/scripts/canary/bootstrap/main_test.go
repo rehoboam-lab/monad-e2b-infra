@@ -101,7 +101,8 @@ func TestStateFileIsPrivateExclusiveAndReplaceable(t *testing.T) {
 	initial := bootstrapState{
 		Version:  stateVersion,
 		Project:  "operator-canary",
-		SecretID: "canary-secret",
+		SecretID: "canary-secret-20260729t120000z-deadbeef",
+		Suffix:   "20260729t120000z-deadbeef",
 		TeamID:   uuid.New(),
 	}
 	if err := createStateFile(statePath, initial); err != nil {
@@ -141,17 +142,20 @@ func TestStateFileIsPrivateExclusiveAndReplaceable(t *testing.T) {
 	}
 }
 
-func TestSecretExistsTreatsOnlyNotFoundAsAbsent(t *testing.T) {
+func TestInspectCanarySecretTreatsOnlyNotFoundAsAbsent(t *testing.T) {
 	testDir := t.TempDir()
 	fakeGcloud := filepath.Join(testDir, "gcloud")
 	if err := os.WriteFile(fakeGcloud, []byte("#!/bin/sh\nprintf 'NOT_FOUND\\n' >&2\nexit 1\n"), 0o700); err != nil {
 		t.Fatalf("write fake gcloud: %v", err)
 	}
 
-	exists, err := secretExists(
+	state := bootstrapState{
+		SecretID: "canary-secret-20260729t120000z-deadbeef",
+	}
+	exists, err := inspectCanarySecret(
 		context.Background(),
 		config{gcloud: fakeGcloud, project: "operator-canary"},
-		"canary-secret",
+		state,
 	)
 	if err != nil {
 		t.Fatalf("inspect absent secret: %v", err)
@@ -163,12 +167,76 @@ func TestSecretExistsTreatsOnlyNotFoundAsAbsent(t *testing.T) {
 	if err := os.WriteFile(fakeGcloud, []byte("#!/bin/sh\nprintf 'PERMISSION_DENIED\\n' >&2\nexit 1\n"), 0o700); err != nil {
 		t.Fatalf("rewrite fake gcloud: %v", err)
 	}
-	if _, err := secretExists(
+	if _, err := inspectCanarySecret(
 		context.Background(),
 		config{gcloud: fakeGcloud, project: "operator-canary"},
-		"canary-secret",
+		state,
 	); err == nil {
 		t.Fatal("expected a non-not-found gcloud failure to be preserved")
+	}
+}
+
+func TestInspectCanarySecretRequiresOwnedLabelAndName(t *testing.T) {
+	testDir := t.TempDir()
+	fakeGcloud := filepath.Join(testDir, "gcloud")
+	state := bootstrapState{
+		SecretID: "canary-secret-20260729t120000z-deadbeef",
+	}
+
+	writeFakeGcloud := func(output string) {
+		t.Helper()
+		script := "#!/bin/sh\nprintf '%s' '" + output + "'\n"
+		if err := os.WriteFile(fakeGcloud, []byte(script), 0o700); err != nil {
+			t.Fatalf("write fake gcloud: %v", err)
+		}
+	}
+
+	writeFakeGcloud(`{"name":"projects/1/secrets/canary-secret-20260729t120000z-deadbeef","labels":{"purpose":"other"}}`)
+	if _, err := inspectCanarySecret(
+		context.Background(),
+		config{gcloud: fakeGcloud, project: "operator-canary"},
+		state,
+	); err == nil {
+		t.Fatal("expected a non-canary secret label to be rejected")
+	}
+
+	writeFakeGcloud(`{"name":"projects/1/secrets/another-secret","labels":{"purpose":"monad-sdk-canary"}}`)
+	if _, err := inspectCanarySecret(
+		context.Background(),
+		config{gcloud: fakeGcloud, project: "operator-canary"},
+		state,
+	); err == nil {
+		t.Fatal("expected a mismatched secret name to be rejected")
+	}
+
+	writeFakeGcloud(`{"name":"projects/1/secrets/canary-secret-20260729t120000z-deadbeef","labels":{"purpose":"monad-sdk-canary"}}`)
+	exists, err := inspectCanarySecret(
+		context.Background(),
+		config{gcloud: fakeGcloud, project: "operator-canary"},
+		state,
+	)
+	if err != nil || !exists {
+		t.Fatalf("expected owned canary secret, exists=%v err=%v", exists, err)
+	}
+}
+
+func TestCanaryTeamIdentityMatchesExactSuffix(t *testing.T) {
+	const suffix = "20260729t120000z-deadbeef"
+	if !canaryTeamIdentityMatches(
+		suffix,
+		"monad-sdk-canary+"+suffix+"@example.invalid",
+		"Monad SDK canary "+suffix,
+		"monad-sdk-canary-"+suffix,
+	) {
+		t.Fatal("expected exact generated team identity to match")
+	}
+	if canaryTeamIdentityMatches(
+		suffix,
+		"real-customer@example.com",
+		"Monad SDK canary "+suffix,
+		"monad-sdk-canary-"+suffix,
+	) {
+		t.Fatal("expected a non-canary team identity to be rejected")
 	}
 }
 

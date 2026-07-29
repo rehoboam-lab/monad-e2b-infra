@@ -38,7 +38,10 @@ make -C packages/db canary-cleanup \
   STATE_FILE=/private/operator-state/monad-sdk-canary.json
 ```
 
-Cleanup is idempotent across partial database/secret deletion. Do not use the
+Cleanup is idempotent across partial database/secret deletion. Before deleting
+anything, it locks and verifies the exact generated team/API-key identity and
+requires the Secret Manager object to retain its `purpose=monad-sdk-canary`
+label and recorded name. A mismatched state file fails closed. Do not use the
 general development seed helper for this canary, do not place the state file in
 the repository, and do not allow the synthetic credential to reach customer
 data or production workloads.
