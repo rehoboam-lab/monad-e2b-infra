@@ -148,7 +148,7 @@ func bootstrap(ctx context.Context, cfg config) error {
 			)
 			return
 		}
-		if err := os.Remove(cfg.statePath); err != nil {
+		if err := removeStateFile(cfg.statePath); err != nil {
 			fmt.Fprintf(
 				os.Stderr,
 				"cleanup completed but state removal failed: remove %q after verifying the identifiers\n",
@@ -244,7 +244,7 @@ func cleanup(ctx context.Context, cfg config) error {
 	if err := reconcile(ctx, cfg, state); err != nil {
 		return err
 	}
-	if err := os.Remove(cfg.statePath); err != nil {
+	if err := removeStateFile(cfg.statePath); err != nil {
 		return errors.New("could not remove the reconciled canary state file")
 	}
 
@@ -329,6 +329,9 @@ func createStateFile(path string, state bootstrapState) error {
 	if err := file.Close(); err != nil {
 		return errors.New("could not close the canary reconciliation state")
 	}
+	if err := syncParentDirectory(path); err != nil {
+		return errors.New("could not sync the canary reconciliation state directory")
+	}
 
 	return nil
 }
@@ -364,8 +367,28 @@ func replaceStateFile(path string, state bootstrapState) error {
 	if err := os.Rename(tempPath, path); err != nil {
 		return errors.New("could not replace the canary reconciliation state")
 	}
+	if err := syncParentDirectory(path); err != nil {
+		return errors.New("could not sync the canary reconciliation state directory")
+	}
 
 	return nil
+}
+
+func removeStateFile(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncParentDirectory(path)
+}
+
+func syncParentDirectory(path string) error {
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+
+	return directory.Sync()
 }
 
 func readStateFile(path string) (bootstrapState, error) {
