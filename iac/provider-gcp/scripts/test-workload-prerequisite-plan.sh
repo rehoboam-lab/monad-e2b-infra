@@ -193,7 +193,7 @@ jq -n \
         root_module: {
           child_modules: [{
             address: "module.init",
-            resources: $cloud_sql_project[0]
+            resources: [$cloud_sql_project[0]]
           }]
         }
       }
