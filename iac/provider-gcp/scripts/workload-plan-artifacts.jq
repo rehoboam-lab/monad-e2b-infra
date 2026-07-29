@@ -175,6 +175,7 @@ planned_resources as $planned
       $orchestrator_rows[]
       | select(
         .values.family != $artifacts.orchestrator_image.family
+          or .values.project != $artifacts.orchestrator_image.project
           or (
             # planned_values retains only configuration fields for data
             # sources that Terraform defers. Validate computed identity when
@@ -254,6 +255,8 @@ planned_resources as $planned
                 | select(
                     .values.family
                     == $artifacts.orchestrator_image.family
+                    and .values.project
+                    == $artifacts.orchestrator_image.project
                   )
               ]
               | length

@@ -170,7 +170,8 @@ jq '
   ) = {
     family: "e2b-orch",
     filter: null,
-    most_recent: null
+    most_recent: null,
+    project: "monad-code"
   }
 ' "${fixture}" >"${test_dir}/deferred-image-data-sources.json"
 expect_success \
@@ -187,7 +188,8 @@ jq '
   ) = {
     family: "e2b-orch",
     filter: null,
-    most_recent: null
+    most_recent: null,
+    project: "monad-code"
   }
   | (
       .resource_changes[]
@@ -249,6 +251,24 @@ expect_failure \
   "unreviewed-deferred-worker-image-family" \
   "invalid_orchestrator_images must be empty." \
   "${test_dir}/unreviewed-deferred-worker-image-family.json"
+
+jq '
+  (
+    .planned_values.root_module
+    | recurse(.child_modules[]?)
+    | .resources[]?
+    | select(
+        .address
+        == "module.cluster.module.build_cluster[\"default\"].data.google_compute_image.source_image"
+      )
+    | .values.project
+  ) = "attacker-project"
+' "${test_dir}/deferred-worker-template-images.json" \
+  >"${test_dir}/unreviewed-deferred-worker-image-project.json"
+expect_failure \
+  "unreviewed-deferred-worker-image-project" \
+  "invalid_orchestrator_images must be empty." \
+  "${test_dir}/unreviewed-deferred-worker-image-project.json"
 
 jq '
   (
