@@ -36,6 +36,12 @@ const connection = {
 };
 
 try {
+  if (await Template.exists(templateName, connection)) {
+    throw new Error(
+      `template reference ${templateName} already exists; choose a new immutable tag`,
+    );
+  }
+
   const definition = Template()
     .fromUbuntuImage('24.04')
     .runCmd(
@@ -57,6 +63,7 @@ try {
     `${JSON.stringify(
       {
         sdk_version: packageMetadata.version,
+        template_ref: templateName,
         template_name: result.name,
         template_id: result.templateId,
         build_id: result.buildId,

@@ -43,7 +43,8 @@ E2B_TEMPLATE_NAME=monad-gcp-canary-base:infra-<reviewed-sha> \
   npm run --prefix tests/operator-canary build-template
 ```
 
-Set `E2B_TEMPLATE` to the returned immutable name/tag, run the canary, and
+The build refuses to overwrite an existing name/tag. Set `E2B_TEMPLATE` to the
+returned `template_ref`, run the canary, and
 retain its non-secret JSON evidence:
 
 ```bash
