@@ -85,6 +85,12 @@ grep -F '"postgresql://%s:%s@%s:5432/%s?sslmode=require"' \
   "${cloud_sql_config}" >/dev/null
 grep -F 'password = random_password.cloud_sql_operator_canary.result' \
   "${cloud_sql_config}" >/dev/null
+grep -F 'resource "google_sql_database_instance" "invited_beta"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'name             = "${var.prefix}postgres-beta"' \
+  "${cloud_sql_config}" >/dev/null
+grep -F 'password = random_password.cloud_sql_invited_beta.result' \
+  "${cloud_sql_config}" >/dev/null
 grep -F 'secret = module.init.postgres_connection_string_secret_name' \
   "${cloud_sql_config}" >/dev/null
 grep -F 'member  = "serviceAccount:${google_project_service_identity.cloud_sql.email}"' \
@@ -1066,6 +1072,18 @@ expect_failure \
 jq '
   (
     .resource_changes[]
+    | select(.address == "google_sql_database_instance.invited_beta")
+    | .change.after.settings[0].availability_type
+  ) = "ZONAL"
+' "${fixture}" >"${test_dir}/cloud-sql-candidate-not-regional.json"
+expect_failure \
+  "cloud-sql-candidate-not-regional" \
+  "invalid_cloud_sql_resources must be empty." \
+  "${test_dir}/cloud-sql-candidate-not-regional.json"
+
+jq '
+  (
+    .resource_changes[]
     | select(.address == "terraform_data.cloud_sql_connection_budget")
     | .change.after.input.db_max_open_connections
   ) = 7
@@ -1733,6 +1751,16 @@ expect_failure \
   "missing-cloud-sql-secret-version" \
   "missing_or_duplicate_cloud_sql_resources must be empty." \
   "${test_dir}/missing-cloud-sql-secret-version.json"
+
+jq '
+  .resource_changes |= map(
+    select(.address != "google_sql_database_instance.invited_beta")
+  )
+' "${fixture}" >"${test_dir}/missing-cloud-sql-candidate.json"
+expect_failure \
+  "missing-cloud-sql-candidate" \
+  "missing_or_duplicate_cloud_sql_resources must be empty." \
+  "${test_dir}/missing-cloud-sql-candidate.json"
 
 jq '
   (

@@ -701,6 +701,18 @@ expect_failure \
   "${test_dir}/wrong-sql-region.json"
 
 jq '
+  (
+    .resource_changes[]
+    | select(.address == "google_sql_database_instance.invited_beta")
+    | .change.after.settings[0].tier
+  ) = "db-f1-micro"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-candidate-sql-tier.json"
+expect_failure \
+  wrong-candidate-sql-tier \
+  "invalid_cloud_sql_resources must be empty" \
+  "${test_dir}/wrong-candidate-sql-tier.json"
+
+jq '
   .expected_cloud_sql.application_connection_budget = 99
 ' "${policy}" >"${test_dir}/loose-cloud-sql-policy.json"
 expect_failure \
