@@ -5,7 +5,11 @@
 - Project: `monad-code`.
 - Region/zone: `us-east4` / `us-east4-c`.
 - Audit principal: `yasser@engram.org` through the local `gcloud` OAuth flow.
-- Infra revision under audit: `453b9726fc6083e0d066849fdd1e38638c5f32c4`.
+- Deployed infra revision under audit:
+  `6814caa9c1480507696e7a7e54feeaad03f23c38`.
+- Post-rollout revalidation completed at `2026-08-03T08:19:37Z` after the
+  three-server, two-API, two-client, one-build topology reached its bounded
+  readiness gate.
 - Checks were read-only. No secret values or log payloads were printed or
   retained as evidence.
 
@@ -32,7 +36,8 @@ entry; it is not a service-account credential.
 
 ## Logs, secrets, artifacts, and GitHub configuration
 
-Cloud Logging was queried from `2026-07-04T00:00:00Z` through the audit time.
+Cloud Logging was queried from `2026-07-04T00:00:00Z` through the revalidation
+time.
 Each query returned zero matches (bounded at 100 results):
 
 - `BEGIN PRIVATE KEY` markers.
@@ -41,8 +46,9 @@ Each query returned zero matches (bounded at 100 results):
 - `google.iam.admin.v1.CreateServiceAccountKey` audit events.
 
 Secret Manager names contain no service-account, credential, private-key, JSON
-keyfile, or keyfile-shaped entry. Fourteen GCS buckets and fourteen currently
-listed objects were inspected by name; no object name is key-shaped.
+keyfile, or keyfile-shaped entry. Fourteen GCS buckets and 1,800 recursively
+listed objects were inspected by name; no object name is GCP
+service-account/keyfile-shaped.
 
 The TAMS `dev` environment exposes the E2B configuration only as environment
 variables plus the E2B API secret. No `dev` or repository GitHub secret name is
@@ -67,6 +73,11 @@ nodes (three control, two API, and one build), and one concurrent replacement:
 22 total instances. No `IN_USE_ADDRESSES` increase is justified by the live
 snapshot or the reviewed topology. A quota request remains mandatory if a
 saved Terraform plan later proves a measured shortfall.
+
+The independent post-rollout Terraform 1.7.5 cluster plan at infra revision
+`6814caa9c1480507696e7a7e54feeaad03f23c38` reported `No changes`. Its topology,
+cluster-mutation scope, release-artifact, and live-quota guards passed before
+the shared mutation lease was released.
 
 ## Result and remaining security action
 
