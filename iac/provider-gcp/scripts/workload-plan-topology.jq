@@ -647,6 +647,26 @@ managed_changes as $changes
     | first
   ) as $cloud_sql_candidate_user
 | (
+    $cloud_sql_resources
+    | map(
+        select(
+          .address
+          == "google_secret_manager_secret.cloud_sql_invited_beta_password"
+        )
+      )
+    | first
+  ) as $cloud_sql_candidate_password_secret
+| (
+    $cloud_sql_resources
+    | map(
+        select(
+          .address
+          == "google_secret_manager_secret_version.cloud_sql_invited_beta_password"
+        )
+      )
+    | first
+  ) as $cloud_sql_candidate_password_version
+| (
     [
       $changes[]
       | select(
@@ -1539,6 +1559,57 @@ managed_changes as $changes
         | {
             address: .address,
             reason: "candidate-database-password-policy"
+          }
+      ]
+      + [
+        $cloud_sql_candidate_password_secret
+        | (
+            $cloud_sql_candidate_instance.change.after.name
+            | rtrimstr(
+                $expected.expected_cloud_sql.candidate_instance_name_suffix
+              )
+          ) as $prefix
+        | select(
+            .change.after.project
+              != $cloud_sql_candidate_instance.change.after.project
+            or .change.after.secret_id
+              != (
+                $prefix
+                + $expected.expected_cloud_sql.candidate_password_secret_id_suffix
+              )
+            or .change.after.deletion_protection != true
+            or (.change.after.replication[0].auto | length) != 1
+            or (.change.after.replication[0].user_managed | length) != 0
+          )
+        | {
+            address: .address,
+            reason: "candidate-password-secret"
+          }
+      ]
+      + [
+        $cloud_sql_candidate_password_version
+        | select(
+            .change.after_sensitive.secret_data != true
+            or (
+              if (.change.after.secret | type) == "string" then
+                (.change.after.secret | length) == 0
+              else
+                .change.after.secret != null
+                  or .change.after_unknown.secret != true
+              end
+            )
+            or (
+              if (.change.after.secret_data | type) == "string" then
+                false
+              else
+                .change.after.secret_data != null
+                  or .change.after_unknown.secret_data != true
+              end
+            )
+          )
+        | {
+            address: .address,
+            reason: "candidate-password-secret-version"
           }
       ]
       + [

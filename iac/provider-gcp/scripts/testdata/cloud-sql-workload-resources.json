@@ -473,5 +473,56 @@
         "password": true
       }
     }
+  },
+  {
+    "address": "google_secret_manager_secret.cloud_sql_invited_beta_password",
+    "mode": "managed",
+    "type": "google_secret_manager_secret",
+    "name": "cloud_sql_invited_beta_password",
+    "change": {
+      "actions": [
+        "create"
+      ],
+      "after": {
+        "deletion_protection": true,
+        "project": "operator-canary",
+        "replication": [
+          {
+            "auto": [
+              {}
+            ],
+            "user_managed": []
+          }
+        ],
+        "secret_id": "e2b-postgres-beta-password"
+      },
+      "after_unknown": {
+        "id": true,
+        "name": true
+      }
+    }
+  },
+  {
+    "address": "google_secret_manager_secret_version.cloud_sql_invited_beta_password",
+    "mode": "managed",
+    "type": "google_secret_manager_secret_version",
+    "name": "cloud_sql_invited_beta_password",
+    "change": {
+      "actions": [
+        "create"
+      ],
+      "after": {
+        "secret": null,
+        "secret_data": null
+      },
+      "after_unknown": {
+        "secret": true,
+        "secret_data": true,
+        "version": true
+      },
+      "after_sensitive": {
+        "secret_data": true
+      }
+    }
   }
 ]

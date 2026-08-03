@@ -19,7 +19,8 @@ complete.
 1. Require a clean live Terraform plan with no replacement or deletion of
    `google_sql_database_instance.operator_canary` and no unrelated cluster
    changes.
-2. Create the regional candidate, its database, user, and generated password.
+2. Create the regional candidate, its database, user, generated password, and
+   candidate-only Secret Manager password version.
 3. Confirm private-only networking, encrypted-only connections, regional HA,
    PITR, seven retained backups, and deletion protection through both Terraform
    evidence and the Cloud SQL API.
@@ -27,6 +28,25 @@ complete.
 
 Stop if the source instance, active connection secret, or workload cluster
 appears in the plan with a destructive or replacement action.
+
+Use the dedicated prerequisite path for this phase; the full workload plan may
+contain independent Nomad job reconciliation and is not the provisioning
+artifact:
+
+```bash
+make -C iac/provider-gcp ENV=dev workload-prerequisite-plan
+terraform -chdir=iac/provider-gcp show .tfplan.workload-prerequisite.dev
+make -C iac/provider-gcp ENV=dev workload-prerequisite-apply \
+  CONFIRM='APPLY WORKLOAD PREREQUISITES'
+```
+
+The reviewed environment must set `API_SERVER_COUNT=2`. Before candidate
+creation, the expected saved plan is six creates (candidate instance,
+database, user, generated password, candidate-only password secret, and secret
+version), verified no-ops for the existing prerequisites, and at most the exact
+connection-budget bookkeeping update from one to two API allocations (`19` to
+`28` aggregate connections). Nomad resources, source/active-secret mutations,
+deferred data reads, replacements, and deletes are forbidden.
 
 ## Phase 2: copy and validate
 

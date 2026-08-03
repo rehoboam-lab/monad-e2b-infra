@@ -271,6 +271,25 @@ resource "google_sql_user" "invited_beta" {
   password = random_password.cloud_sql_invited_beta.result
 }
 
+resource "google_secret_manager_secret" "cloud_sql_invited_beta_password" {
+  project             = var.gcp_project_id
+  secret_id           = "${var.prefix}postgres-beta-password"
+  deletion_protection = true
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "cloud_sql_invited_beta_password" {
+  secret      = google_secret_manager_secret.cloud_sql_invited_beta_password.name
+  secret_data = random_password.cloud_sql_invited_beta.result
+
+  depends_on = [
+    google_sql_user.invited_beta,
+  ]
+}
+
 resource "google_secret_manager_secret_version" "postgres_connection_string" {
   secret = module.init.postgres_connection_string_secret_name
   secret_data = format(

@@ -117,6 +117,8 @@
       "time_sleep.service_identity_propagation"
     ],
     "candidate_resource_addresses": [
+      "google_secret_manager_secret.cloud_sql_invited_beta_password",
+      "google_secret_manager_secret_version.cloud_sql_invited_beta_password",
       "google_sql_database.invited_beta",
       "google_sql_database_instance.invited_beta",
       "google_sql_user.invited_beta",
@@ -124,6 +126,7 @@
     ],
     "instance_name_suffix": "postgres-canary",
     "candidate_instance_name_suffix": "postgres-beta",
+    "candidate_password_secret_id_suffix": "postgres-beta-password",
     "connection_secret_id_suffix": "postgres-connection-string",
     "database_version": "POSTGRES_16",
     "tier": "db-f1-micro",
