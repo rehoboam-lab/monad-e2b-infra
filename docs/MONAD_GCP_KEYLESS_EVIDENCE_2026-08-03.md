@@ -62,11 +62,11 @@ The `us-east4` regional quota snapshot was:
 | SSD total GiB | 40,960 | 360 | 40,600 |
 | Local SSD total GiB | effectively unlimited | 1,125 | effectively unlimited |
 
-The 24 available regional instance slots cover the reviewed maximum of 15
-worker hosts, six fixed service nodes, one fixed build node, and one concurrent
-replacement. No `IN_USE_ADDRESSES` increase is justified by the live snapshot
-or the reviewed topology. A quota request remains mandatory if a saved
-Terraform plan later proves a measured shortfall.
+The 32-instance limit covers the reviewed maximum of 15 worker hosts, six fixed
+nodes (three control, two API, and one build), and one concurrent replacement:
+22 total instances. No `IN_USE_ADDRESSES` increase is justified by the live
+snapshot or the reviewed topology. A quota request remains mandatory if a
+saved Terraform plan later proves a measured shortfall.
 
 ## Result and remaining security action
 
