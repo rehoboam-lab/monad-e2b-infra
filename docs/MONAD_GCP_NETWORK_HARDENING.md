@@ -43,7 +43,8 @@ SSH-key value.
   guard. A direct or normal `-target=module.cluster` plan therefore cannot omit it.
 - The staged replacement path is restricted to the current `dev` invited-beta fleet. Any non-dev
   stage fails at the in-module plan guard, leaving its upstream opportunistic MIG policy unchanged;
-  production/staging require a separately reviewed replacement strategy.
+  production/staging retain their existing IAP-only firewall posture at `disabled` and require a
+  separately reviewed instance-replacement strategy.
 - The rollout marker permits exactly `disabled -> network -> server -> api -> worker -> build`.
   A stage-specific convergence sentinel waits for the administrative firewalls and affected MIGs
   to report both `status.isStable` and `status.versionTarget.isReached` before that marker advances.

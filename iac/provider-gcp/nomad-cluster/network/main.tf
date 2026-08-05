@@ -555,10 +555,13 @@ resource "google_compute_firewall" "internal_remote_connection_firewall_ingress"
   lifecycle {
     precondition {
       condition = (
-        var.os_login_operator_access_confirmed
-        && var.network_hardening_rollout_stage != "disabled"
+        var.environment != "dev"
+        || (
+          var.os_login_operator_access_confirmed
+          && var.network_hardening_rollout_stage != "disabled"
+        )
       )
-      error_message = "IAP firewall hardening requires the in-graph OS Login access guard and a reviewed rollout stage."
+      error_message = "Dev IAP firewall hardening requires the in-graph OS Login access guard and a reviewed rollout stage; non-dev already uses the IAP-only posture."
     }
   }
 }
@@ -587,10 +590,13 @@ resource "google_compute_firewall" "remote_connection_firewall_ingress" {
   lifecycle {
     precondition {
       condition = (
-        var.os_login_operator_access_confirmed
-        && var.network_hardening_rollout_stage != "disabled"
+        var.environment != "dev"
+        || (
+          var.os_login_operator_access_confirmed
+          && var.network_hardening_rollout_stage != "disabled"
+        )
       )
-      error_message = "Public administrative ingress denial requires the in-graph OS Login access guard and a reviewed rollout stage."
+      error_message = "Dev public administrative ingress denial requires the in-graph OS Login access guard and a reviewed rollout stage; non-dev already uses this deny posture."
     }
   }
 }

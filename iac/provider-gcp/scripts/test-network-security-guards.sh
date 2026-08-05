@@ -71,11 +71,13 @@ fi
 grep -F 'ports    = ["22", "3389"]' <<<"${iap_allow}" >/dev/null
 grep -F 'log_config {' <<<"${iap_allow}" >/dev/null
 grep -F 'metadata = "EXCLUDE_ALL_METADATA"' <<<"${iap_allow}" >/dev/null
+grep -F 'var.environment != "dev"' <<<"${iap_allow}" >/dev/null
 
 grep -F 'source_ranges = ["0.0.0.0/0"]' <<<"${internet_deny}" >/dev/null
 grep -F 'ports    = ["22", "3389"]' <<<"${internet_deny}" >/dev/null
 grep -F 'log_config {' <<<"${internet_deny}" >/dev/null
 grep -F 'metadata = "EXCLUDE_ALL_METADATA"' <<<"${internet_deny}" >/dev/null
+grep -F 'var.environment != "dev"' <<<"${internet_deny}" >/dev/null
 
 for role in server api loki clickhouse; do
   template_file="${provider_root}/nomad-cluster/nodepool-${role/server/control-server}.tf"

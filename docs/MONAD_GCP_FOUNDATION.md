@@ -124,8 +124,9 @@ greenfield cluster creator or a replacement for the complete one-workcell releas
 checkpoint is required for each stage. For example:
 
 This staged path is deliberately restricted to the `dev` invited-beta environment. Non-dev plans
-fail before mutation and retain their upstream opportunistic MIG policies until a separate rollout
-strategy is reviewed.
+that request a stage fail before mutation and retain their upstream opportunistic MIG policies until
+a separate rollout strategy is reviewed. Their already-IAP-only administrative firewall posture
+remains valid while the rollout stage stays disabled.
 
 ```bash
 mise exec -- make -C iac/provider-gcp workload-cluster-plan \
