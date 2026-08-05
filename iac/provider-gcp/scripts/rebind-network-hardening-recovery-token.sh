@@ -104,6 +104,15 @@ while IFS= read -r changed_path; do
   esac
 done < <(git -C "${repo_root}" diff --name-only "${old_source_head}..${source_head}")
 
+[[ "$(git -C "${repo_root}" rev-parse --verify HEAD)" == "${source_head}" ]] || {
+  printf 'Recovery source head changed during descendant verification.\n' >&2
+  exit 1
+}
+if [[ -n "$(git -C "${repo_root}" status --porcelain --untracked-files=no)" ]]; then
+  printf 'Recovery source became dirty during descendant verification.\n' >&2
+  exit 1
+fi
+
 holder_digest="$(
   {
     printf '%s\n' "${old_holder}" "${old_generation}" "${source_head}"

@@ -295,12 +295,15 @@ case "${mode}" in
         }
       ' >"${replacement_record}"
 
-    "${gcloud_bin}" storage cp \
+    if ! "${gcloud_bin}" storage cp \
       "${replacement_record}" "${lease_token_uri}" \
       --project="${lease_token_project}" \
       --if-generation-match="${lease_token_generation}" \
       --custom-metadata="monad-holder=${new_holder}" \
-      --quiet
+      --quiet; then
+      printf 'Lease transfer was not confirmed. The canonical object may still have changed; the old token is retained but must not be trusted until the live generation and holder are inspected.\n' >&2
+      exit 1
+    fi
     transferred=true
 
     object_json="$(

@@ -193,8 +193,8 @@ Do not apply this branch merely because validation is green.
    captures the replacement generation and exact descendant holder; only after that succeeds is
    the original token removed. Any unrelated diff, stale generation, wrong scope, existing output
    path, or non-network stage fails before mutation. Use the rebound token for the bounded plan and
-   apply below. If the object transfer succeeds but replacement-token capture cannot be proven,
-   stop and inspect the canonical object; never delete or reacquire it speculatively.
+   apply below. If either the object-transfer response or replacement-token capture cannot be
+   proven, stop and inspect the canonical object; never delete or reacquire it speculatively.
 
    The recovery command re-proves live firewall/MIG convergence, exact replacement identity,
    post-replacement IAP/OS Login and stage-specific Nomad/load-balancer health, then requires a clean
