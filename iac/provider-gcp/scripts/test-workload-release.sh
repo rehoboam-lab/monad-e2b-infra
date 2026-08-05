@@ -1233,6 +1233,38 @@ if grep -Eq -- '(^|[[:space:]])-destroy(=|[[:space:]]|$)' \
   exit 1
 fi
 
+cp "${workflow_checkpoint}" "${test_dir}/network-checkpoint.long-lived.json"
+short_checkpoint_now="$(date -u +%s)"
+jq \
+  --argjson now "${short_checkpoint_now}" '
+    .observed_unix = $now
+    | .expires_unix = ($now + 5)
+  ' "${test_dir}/network-checkpoint.long-lived.json" \
+  >"${workflow_checkpoint}.short"
+mv "${workflow_checkpoint}.short" "${workflow_checkpoint}"
+chmod 0600 "${workflow_checkpoint}"
+"${workflow_provider}/scripts/assert-network-hardening-checkpoint.sh" \
+  network "${workflow_checkpoint}" monad-code us-east4 us-east4-a e2b- \
+  "${workflow_repo}" >/dev/null
+expect_pass "short-lived checkpoint binds a reviewed cluster plan" \
+  run_workflow_make workload-cluster-plan
+sleep 6
+: >"${workflow_lease_log}"
+cluster_apply_count_before="$(grep -c '^apply ' "${workflow_terraform_log}" || true)"
+expect_fail "checkpoint expiring after plan blocks cluster mutation" \
+  run_workflow_make \
+  workload-cluster-apply CONFIRM='APPLY NETWORK HARDENING network'
+test "$(grep -c '^apply ' "${workflow_terraform_log}" || true)" \
+  -eq "${cluster_apply_count_before}"
+test -f "${workflow_cluster_plan}"
+test -f "${workflow_cluster_manifest}"
+test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1
+test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 1
+mv "${test_dir}/network-checkpoint.long-lived.json" "${workflow_checkpoint}"
+chmod 0600 "${workflow_checkpoint}"
+expect_pass "fresh checkpoint supersedes the expired reviewed cluster plan" \
+  run_workflow_make workload-cluster-plan
+
 expect_fail "wrong cluster apply confirmation preserves saved release" \
   run_workflow_make workload-cluster-apply CONFIRM=wrong
 test -f "${workflow_cluster_plan}"
@@ -1487,6 +1519,10 @@ cluster_lease_assert_line="$(
   grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" assert-held' \
     <<<"${cluster_apply_recipe}" | cut -d: -f1
 )"
+cluster_checkpoint_assert_line="$(
+  grep -nF './scripts/assert-network-hardening-checkpoint.sh' \
+    <<<"${cluster_apply_recipe}" | cut -d: -f1
+)"
 cluster_convergence_line="$(
   grep -nF './scripts/wait-network-hardening-stage.sh' \
     <<<"${cluster_apply_recipe}" | cut -d: -f1
@@ -1495,6 +1531,7 @@ cluster_release_line="$(
   grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
     <<<"${cluster_apply_recipe}" | tail -1 | cut -d: -f1
 )"
+test "${cluster_checkpoint_assert_line}" -lt "${cluster_lease_assert_line}"
 test "${cluster_lease_assert_line}" -lt "${cluster_apply_line}"
 test "${cluster_apply_line}" -lt "${cluster_convergence_line}"
 test "${cluster_convergence_line}" -lt "${cluster_release_line}"

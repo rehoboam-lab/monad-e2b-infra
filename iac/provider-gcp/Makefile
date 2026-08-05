@@ -584,6 +584,9 @@ workload-cluster-apply:
 		$(workload_cluster_metadata_context) ./scripts/workload-plan-metadata.sh verify \
 			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
 			"$${after_artifacts}"; \
+		./scripts/assert-network-hardening-checkpoint.sh \
+			"$(WORKLOAD_CLUSTER_STAGE)" "$(WORKLOAD_CLUSTER_CHECKPOINT)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."; \
 		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
 			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${lease_token}"; \

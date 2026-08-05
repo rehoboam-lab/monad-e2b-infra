@@ -56,7 +56,8 @@ SSH-key value.
 - Every stage requires a mode-0600, non-symlink checkpoint bound to the exact project, region,
   zone, prefix, Git head, named operator, and a maximum one-hour validity window. Its checks and
   evidence are stage-specific. The complete checkpoint and digest are embedded in the saved-plan
-  manifest and revalidated before apply.
+  manifest; its full schema and expiry are revalidated under the shared rollout lease immediately
+  before Terraform mutation.
 - Guest private/control-plane denies run on the tap before host NAT and before tenant allow rules.
   The host's own metadata ADC path does not traverse that tap rule.
 - `make -C iac/provider-gcp network-security-check` guards all of these source relationships and
@@ -73,8 +74,9 @@ The local branch passed the following checks before handoff:
 - `network-security-check`, including a real targeted child-module plan that proves the in-graph
   OS Login guard blocks a replacement when confirmation is false.
 - Serial rollout fixtures for every allowed transition, exact mutation boundaries, fresh
-  checkpoints, asynchronous MIG convergence, partial-stage retry, reverse-stage rejection,
-  skipped-stage rejection, closed-guard rejection, and protection of generic-autoscaler ownership.
+  checkpoints, post-plan checkpoint expiry rejection, asynchronous MIG convergence, partial-stage
+  retry, reverse-stage rejection, skipped-stage rejection, closed-guard rejection, and protection
+  of generic-autoscaler ownership.
 - The complete Linux `packages/orchestrator/pkg/sandbox/network` suite in a privileged container,
   including real network-namespace, iptables, and nftables tests.
 - The complete Linux `packages/orchestrator/pkg/tcpfirewall` suite with its Docker-backed listener

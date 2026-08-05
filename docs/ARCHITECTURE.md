@@ -422,20 +422,22 @@ flowchart TB
 - Server, API, worker, build, and optional data nodes have no per-instance public address in the
   invited-beta topology. Two reviewed static addresses back one Cloud NAT with full translation
   logging. Administrative SSH/RDP is allowed only from Google's IAP TCP-forwarding range
-  (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every fleet
-  instance template enables OS Login after its serial rollout stage. The authorization guard lives
+  (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every dev
+  fleet instance template enables OS Login after its serial rollout stage. The authorization guard lives
   inside `module.cluster` and every replacement path depends on it, so a targeted saved plan cannot
   omit it. A convergence sentinel and state-backed marker serialize adoption as
   `network -> server -> api -> worker -> build`; each stage requires a fresh, private operator
   checkpoint for IAP/OS Login plus the role-specific health or drain evidence. The checkpoint bytes
-  are bound into saved-plan provenance and revalidated before apply. The marker remains at the prior
-  stage until the affected MIG is stable and has reached its target version, and the shared rollout
-  lease remains held through that proof. If apply starts but that proof is interrupted or times
+  are bound into saved-plan provenance; their expiry and full schema are revalidated under the held
+  rollout lease immediately before mutation. The marker remains at the prior stage until the
+  affected MIG is stable and has reached its target version, and the shared rollout lease remains
+  held through that proof. If apply starts but that proof is interrupted or times
   out, the generation-bound lease and recovery token remain held until an explicit recovery command
   re-proves convergence and a clean Terraform post-plan, or a fresh reviewed same-stage retry runs
-  under the borrowed token. Ordinary full workload plans require the convergence sentinel and
-  state marker to remain matching, non-disabled no-ops; they cannot initialize, advance, skip, or
-  reverse the staged rollout. The staged workflow is hard-failed outside the current `dev`
+  under the borrowed token. Ordinary full workload plans in `dev` require the convergence sentinel
+  and state marker to remain matching, non-disabled no-ops; they cannot initialize, advance, skip,
+  or reverse the staged rollout. Non-dev ordinary plans may only initialize or preserve both
+  resources at `disabled`. The staged workflow is hard-failed outside the current `dev`
   invited-beta environment, so non-dev retains its upstream opportunistic MIG policy pending a
   separately reviewed replacement strategy. This prevents both operator lockout and concurrent
   PROACTIVE replacement of every pool. The public load balancer is the only
