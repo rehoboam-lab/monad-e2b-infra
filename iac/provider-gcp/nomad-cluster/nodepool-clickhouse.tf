@@ -125,6 +125,7 @@ resource "google_compute_instance_template" "clickhouse" {
   metadata_startup_script = local.clickhouse_start_script
   metadata = {
     enable-osconfig         = "TRUE",
+    enable-oslogin          = "TRUE",
     enable-guest-attributes = "TRUE",
     node-pool               = var.clickhouse_node_pool,
   }

@@ -540,10 +540,17 @@ resource "google_compute_firewall" "internal_remote_connection_firewall_ingress"
 
   priority = 900
 
+  # Record administrative access decisions without copying packet metadata
+  # into Cloud Logging. This rule is intentionally identical in dev: the
+  # invited-beta fleet is administered only through IAP.
+  log_config {
+    metadata = "EXCLUDE_ALL_METADATA"
+  }
+
   direction   = "INGRESS"
   target_tags = [var.cluster_tag_name]
   # https://googlecloudplatform.github.io/iap-desktop/setup-iap/
-  source_ranges = var.environment == "dev" ? ["0.0.0.0/0"] : ["35.235.240.0/20"]
+  source_ranges = ["35.235.240.0/20"]
 }
 
 resource "google_compute_firewall" "remote_connection_firewall_ingress" {
@@ -556,12 +563,9 @@ resource "google_compute_firewall" "remote_connection_firewall_ingress" {
   }
 
 
-  #  Metadata fields can be found here: https://cloud.google.com/firewall/docs/firewall-rules-logging#log-format
-  dynamic "log_config" {
-    for_each = var.environment != "dev" ? [1] : []
-    content {
-      metadata = "EXCLUDE_ALL_METADATA"
-    }
+  # Metadata fields can be found here: https://cloud.google.com/firewall/docs/firewall-rules-logging#log-format
+  log_config {
+    metadata = "EXCLUDE_ALL_METADATA"
   }
 
   priority = 1000

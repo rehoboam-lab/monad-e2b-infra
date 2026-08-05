@@ -311,8 +311,19 @@ variable "nomad_port" {
 
 variable "allow_sandbox_internal_cidrs" {
   type        = string
-  description = "Comma-separated CIDRs to allow through the sandbox firewall deny list (e.g. 10.0.0.1/32,10.0.0.2/32)"
+  description = "Retired GCP compatibility input. It must remain empty so guests cannot bypass the metadata, link-local, private-network, or control-plane deny set."
   default     = ""
+
+  validation {
+    condition     = trimspace(var.allow_sandbox_internal_cidrs) == ""
+    error_message = "ALLOW_SANDBOX_INTERNAL_CIDRS is forbidden on GCP; guest access to metadata, VPC, Cloud SQL, Nomad, Consul, and control-plane ranges must remain fail-closed."
+  }
+}
+
+variable "os_login_operator_access_confirmed" {
+  type        = bool
+  description = "Explicit operator confirmation that IAP tunnel and OS Login administrator access were granted and proven before any OS Login-enabled instance-template rollout."
+  default     = false
 }
 
 variable "orchestrator_node_pool" {

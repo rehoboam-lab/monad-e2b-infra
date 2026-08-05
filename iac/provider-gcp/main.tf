@@ -45,6 +45,21 @@ provider "google-beta" {
   zone    = var.gcp_zone
 }
 
+# Enabling OS Login changes how every replacement fleet node authenticates
+# administrators. Refuse all workload plans until an operator has granted and
+# proven IAP + OS Login access; this prevents an otherwise routine full apply
+# from silently replacing legacy-key nodes with unreachable templates.
+resource "terraform_data" "os_login_operator_access_guard" {
+  input = var.os_login_operator_access_confirmed
+
+  lifecycle {
+    precondition {
+      condition     = var.os_login_operator_access_confirmed
+      error_message = "OS Login rollout is gated: grant and prove roles/iap.tunnelResourceAccessor plus roles/compute.osAdminLogin for the operator principal, then explicitly set os_login_operator_access_confirmed=true in the reviewed workload inputs."
+    }
+  }
+}
+
 data "google_secret_manager_secret_version" "routing_domains" {
   secret = module.init.routing_domains_secret_name
 }

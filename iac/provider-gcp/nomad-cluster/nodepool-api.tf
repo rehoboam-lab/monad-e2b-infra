@@ -119,6 +119,7 @@ resource "google_compute_instance_template" "api" {
     { api_cluster = "TRUE" },
     {
       enable-osconfig         = "TRUE",
+      enable-oslogin          = "TRUE",
       enable-guest-attributes = "TRUE",
     },
   )
@@ -161,10 +162,6 @@ resource "google_compute_instance_template" "api" {
   # which this Terraform resource depends will also need this lifecycle statement.
   lifecycle {
     create_before_destroy = true
-
-    # TODO: Temporary workaround to avoid unnecessary updates to the instance template.
-    #  This should be removed once cluster size is removed from the metadata
-    ignore_changes = [metadata]
   }
 
   depends_on = [

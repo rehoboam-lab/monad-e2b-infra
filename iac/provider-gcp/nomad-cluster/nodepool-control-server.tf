@@ -110,6 +110,7 @@ resource "google_compute_instance_template" "server" {
   metadata_startup_script = local.server_startup_script
   metadata = {
     enable-osconfig         = "TRUE",
+    enable-oslogin          = "TRUE",
     enable-guest-attributes = "TRUE",
     cluster-size            = var.server_cluster_size,
   }

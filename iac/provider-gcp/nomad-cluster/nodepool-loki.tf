@@ -95,6 +95,7 @@ resource "google_compute_instance_template" "loki" {
     { loki_cluster = "TRUE" },
     {
       enable-osconfig         = "TRUE",
+      enable-oslogin          = "TRUE",
       enable-guest-attributes = "TRUE",
     },
   )

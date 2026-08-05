@@ -32,6 +32,7 @@ tf_vars := \
 	$(call tfvar, API_CLUSTER_SIZE) \
 	$(call tfvar, API_USE_NAT) \
 	$(call tfvar, API_NAT_IPS) \
+	$(call tfvar, OS_LOGIN_OPERATOR_ACCESS_CONFIRMED) \
 	$(call tfvar, SERVER_MACHINE_TYPE) \
 	$(call tfvar, SERVER_CLUSTER_SIZE) \
 	$(call tfvar, CLICKHOUSE_CLUSTER_SIZE) \
@@ -220,6 +221,7 @@ workload-plan-assertions-test:
 	@ ../modules/job-template-manager/scripts/test-get-nomad-job-count.sh
 	@ ../modules/job-template-manager/scripts/test-module.sh "$(TF)"
 	@ $(MAKE) worker-startup-render-test
+	@ $(MAKE) network-security-check
 
 workload-release-test:
 	@ ./scripts/test-rollout-mutation-lease.sh
@@ -228,6 +230,11 @@ workload-release-test:
 
 worker-startup-render-test:
 	@ ./scripts/test-worker-startup-render.sh "$(TF)"
+
+.PHONY: network-security-check
+network-security-check:
+	@ ./scripts/test-network-security-guards.sh "$(TF)"
+	@ go test ../../packages/shared/pkg/sandbox-network
 
 packer-reserve-check:
 	@ ./scripts/assert-packer-reserve.sh "$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)"

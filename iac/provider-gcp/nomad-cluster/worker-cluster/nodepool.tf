@@ -181,6 +181,7 @@ resource "google_compute_instance_template" "template" {
   metadata_startup_script = local.startup_script
   metadata = {
     enable-osconfig         = "TRUE",
+    enable-oslogin          = "TRUE",
     enable-guest-attributes = "TRUE",
   }
 

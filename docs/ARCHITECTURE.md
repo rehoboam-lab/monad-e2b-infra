@@ -421,8 +421,23 @@ flowchart TB
   one fixed build node, reported separately from workcell capacity.
 - Server, API, worker, build, and optional data nodes have no per-instance public address in the
   invited-beta topology. Two reviewed static addresses back one Cloud NAT with full translation
-  logging; administration uses IAP and OS Login. The public load balancer is the only application
-  ingress path.
+  logging. Administrative SSH/RDP is allowed only from Google's IAP TCP-forwarding range
+  (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every fleet
+  instance template enables OS Login. A fail-closed Terraform precondition blocks workload plans
+  until an operator explicitly confirms that IAP tunneling and OS Login administrator IAM were
+  granted and proven; replacing legacy-key nodes before that proof risks lockout. The public load
+  balancer is the only application ingress path. See
+  [`MONAD_GCP_NETWORK_HARDENING.md`](MONAD_GCP_NETWORK_HARDENING.md) for the live audit and rollout
+  procedure.
+- Every Firecracker slot installs an nftables `PREROUTING` filter on the guest tap before host
+  masquerading. Its predefined deny set blocks metadata/link-local (`169.254.0.0/16`), loopback,
+  RFC1918, CGNAT, and IPv6 local ranges, which covers the workload VPC, Nomad, Consul, Cloud SQL,
+  and other private control endpoints. The predefined deny precedes tenant allow rules. GCP
+  rejects the former `ALLOW_SANDBOX_INTERNAL_CIDRS` escape hatch, while the synthetic
+  orchestrator-in-sandbox address remains an explicit exception for the hyperloop, portmapper,
+  and NFS proxy redirects. Public destinations, including authenticated public TAMS broker/proxy
+  routes, continue through host NAT and logged Cloud NAT. Because the nftables rules match only
+  the guest tap, host metadata-server access for attached-service-account ADC remains available.
 - The guarded **dev invited-beta topology** gives server and worker regional MIGs zero surge
   and one unavailable instance, so they replace in place. The API zonal MIG retains one surge
   instance. Its build and sandbox workers each use a 100 GB SSD boot disk with 32 GB of swap and
