@@ -134,8 +134,10 @@ Do not apply this branch merely because validation is green.
    If apply or convergence fails, the persisted marker remains at the prior stage: correct the
    in-boundary cause. If apply advances the marker but the post-apply plan finds same-stage drift,
    the bounded retry accepts only a no-op current-stage marker while the forced sentinel replacement
-   re-proves convergence. Once Terraform apply has started, any timeout, interruption, or unverifiable
-   post-apply result preserves the generation-bound shared lease and its private recovery directory.
+   re-proves convergence. If an interrupted replacement leaves that current-stage sentinel absent,
+   only the same stage may recreate it; the next stage remains blocked. Once Terraform apply has
+   started, any timeout, interruption, or unverifiable post-apply result preserves the
+   generation-bound shared lease and its private recovery directory.
    Prove the original process is no longer running, create a fresh checkpoint for the same stage,
    then run:
 
@@ -166,9 +168,11 @@ Do not apply this branch merely because validation is green.
 
    The apply releases the borrowed token only after the normal live-convergence and clean-post-plan
    proofs pass. Borrowed planning, recovery, and every apply first prove that the canonical GCS
-   lease object still matches the private token's exact scope, generation, and holder; stale,
-   replaced, or wrong-scope token copies fail before mutation. Reverse-stage plans remain
-   fail-closed; do not bypass the workflow for an ad hoc rollback.
+   lease object still matches the private token's exact scope, generation, and holder. The live-bound
+   holder names the selected environment and exact Terraform backend prefix, so a token copied from
+   another environment cannot recover or release this state. Stale, replaced, or wrong-scope token
+   copies fail before mutation. Reverse-stage plans remain fail-closed; do not bypass the workflow
+   for an ad hoc rollback.
 7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
    Cloud NAT, and zero leaked workcells before proceeding.

@@ -379,7 +379,8 @@ workload-cluster-plan:
 			./scripts/assert-network-hardening-recovery-token.sh \
 				"$${recovery_token}" "$(TERRAFORM_STATE_BUCKET)" \
 				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
-				"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
+				"$(WORKLOAD_CLUSTER_STAGE)" "$(ENV)" \
+				"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
 		else \
@@ -530,14 +531,15 @@ workload-cluster-apply:
 			./scripts/assert-network-hardening-recovery-token.sh \
 				"$${recovery_token}" "$(TERRAFORM_STATE_BUCKET)" \
 				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
-				"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
+				"$(WORKLOAD_CLUSTER_STAGE)" "$(ENV)" \
+				"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
 		else \
 			"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
 				"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
 				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
-				"cluster-apply:$(WORKLOAD_CLUSTER_STAGE):$${source_head}:$${holder_digest}" "$${lease_token}"; \
+				"cluster-apply:$(WORKLOAD_CLUSTER_STAGE):$(ENV):$(TERRAFORM_STATE_PREFIX):$${source_head}:$${holder_digest}" "$${lease_token}"; \
 		fi; \
 		lease_acquired=true; \
 		test -f "$(WORKLOAD_CLUSTER_PLAN)" || { \
@@ -648,7 +650,8 @@ workload-cluster-recover-lease:
 		./scripts/assert-network-hardening-recovery-token.sh \
 			"$${token}" "$(TERRAFORM_STATE_BUCKET)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
-			"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
+			"$(WORKLOAD_CLUSTER_STAGE)" "$(ENV)" \
+			"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
 		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
 			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${token}"; \

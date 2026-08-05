@@ -64,7 +64,7 @@ load_lease_token() {
     and (.project | type) == "string"
     and (.region | type) == "string"
     and (.holder | type) == "string"
-    and (.holder | test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"))
+    and (.holder | test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"))
     and ((.generation | tostring) | test("^[0-9]+$"))
   ' "${token_file}" >/dev/null || {
     printf 'Lease token schema is invalid.\n' >&2
@@ -129,7 +129,7 @@ case "${mode}" in
     require_component "${bucket}" "state bucket"
     require_component "${project}" "project"
     require_component "${region}" "region"
-    [[ "${holder}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || {
+    [[ "${holder}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$ ]] || {
       printf 'Invalid rollout-lease holder: %s\n' "${holder}" >&2
       exit 1
     }

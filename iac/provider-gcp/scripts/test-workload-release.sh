@@ -1295,7 +1295,7 @@ test "$(grep -c '^release ' "${workflow_lease_log}" || true)" -eq 0
 cluster_recovery_dir="$(find "${workflow_provider}" -maxdepth 1 -type d -name '.workload-cluster-apply.dev.*' -print -quit)"
 cluster_recovery_token="${cluster_recovery_dir}/lease-token.json"
 test -f "${cluster_recovery_token}"
-jq -e '.holder | startswith("cluster-apply:network:")' \
+jq -e '.holder | startswith("cluster-apply:network:dev:terraform/orchestration/dev/state:")' \
   "${cluster_recovery_token}" >/dev/null
 printf 'pass\n' >"${workflow_mode}"
 expect_pass "proven convergence releases the exact preserved cluster lease" \

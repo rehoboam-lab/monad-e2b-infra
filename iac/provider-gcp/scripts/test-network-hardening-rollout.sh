@@ -225,6 +225,38 @@ jq '
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/marker-retry.plan" "${fake_terraform}" server >/dev/null
 
+# A forced same-stage retry can destroy the convergence sentinel before its
+# replacement is persisted. The current marker must be allowed to repair that
+# missing sentinel, while the following stage must remain blocked.
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.actions) = ["create"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before) = null
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.before.input) = "server"
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.actions) = ["no-op"]
+' "${test_dir}/server.plan" >"${test_dir}/missing-sentinel-retry.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-sentinel-retry.plan" "${fake_terraform}" server >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.actions) = ["create"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before) = null
+' "${test_dir}/api.plan" >"${test_dir}/missing-previous-sentinel.plan"
+expect_fail "missing previous-stage sentinel cannot admit the following stage" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-previous-sentinel.plan" "${fake_terraform}" api
+
 # A successful apply can advance the marker and still leave same-stage drift
 # for the post-apply plan to detect. The borrowed-token retry must accept the
 # current marker as a no-op while the forced sentinel replacement re-proves

@@ -112,14 +112,40 @@ jq -e \
           .change.actions == ["create"]
           or .change.actions == ["update"]
         )
+        and (
+          (
+            $stage == "network"
+            and $completion_change.change.before == null
+            and $completion_change.change.actions == ["create"]
+          )
+          or (
+            (
+              $completion_change.change.before.input == $previous
+              or $completion_change.change.before.input == $stage
+            )
+            and (
+              $completion_change.change.actions == ["create"]
+              or $completion_change.change.actions == ["delete", "create"]
+              or $completion_change.change.actions == ["create", "delete"]
+            )
+          )
+        )
       )
       or (
         .change.before.input == $stage
         and .change.actions == ["no-op"]
-        and $completion_change.change.before.input == $stage
         and (
-          $completion_change.change.actions == ["delete", "create"]
-          or $completion_change.change.actions == ["create", "delete"]
+          (
+            $completion_change.change.before == null
+            and $completion_change.change.actions == ["create"]
+          )
+          or (
+            $completion_change.change.before.input == $stage
+            and (
+              $completion_change.change.actions == ["delete", "create"]
+              or $completion_change.change.actions == ["create", "delete"]
+            )
+          )
         )
       )
     )

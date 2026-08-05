@@ -61,7 +61,7 @@ chmod 0755 "${fake_gcloud}"
 
 export FAKE_GCS_ROOT="${temp_dir}/gcs"
 token="${temp_dir}/lease-token.json"
-holder="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+holder="cluster-apply:worker:dev:terraform/orchestration/dev/state:0123456789abcdef0123456789abcdef01234567:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 uri_path="${FAKE_GCS_ROOT}/state-bucket/operator-locks/test-project/us-east4/workload-mutation.json"
 
 "${lease_script}" acquire \

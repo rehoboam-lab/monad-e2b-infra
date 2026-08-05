@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-token_path="${1:?usage: assert-network-hardening-recovery-token.sh TOKEN STATE_BUCKET PROJECT REGION STAGE REPO_ROOT}"
+token_path="${1:?usage: assert-network-hardening-recovery-token.sh TOKEN STATE_BUCKET PROJECT REGION STAGE ENVIRONMENT STATE_PREFIX REPO_ROOT}"
 state_bucket="${2:?state bucket is required}"
 project="${3:?project is required}"
 region="${4:?region is required}"
 stage="${5:?stage is required}"
-repo_root="${6:?repository root is required}"
+environment="${6:?environment is required}"
+state_prefix="${7:?state prefix is required}"
+repo_root="${8:?repository root is required}"
 
 case "${stage}" in
   network | server | api | worker | build) ;;
@@ -32,7 +34,7 @@ if (( (8#${token_mode} & 077) != 0 )); then
 fi
 
 source_head="$(git -C "${repo_root}" rev-parse --verify HEAD)"
-holder_prefix="cluster-apply:${stage}:${source_head}:"
+holder_prefix="cluster-apply:${stage}:${environment}:${state_prefix}:${source_head}:"
 expected_uri="gs://${state_bucket}/operator-locks/${project}/${region}/workload-mutation.json"
 jq -e \
   --arg state_bucket "${state_bucket}" \
@@ -45,12 +47,14 @@ jq -e \
     and .project == $project
     and .region == $region
     and .uri == $expected_uri
-    and (.holder | test("^" + $holder_prefix + "[0-9a-f]{64}$"))
+    and (.holder | startswith($holder_prefix))
+    and ((.holder | ltrimstr($holder_prefix)) | test("^[0-9a-f]{64}$"))
     and ((.generation | tostring) | test("^[0-9]+$"))
   ' "${token_path}" >/dev/null || {
-  printf 'Recovery token is not bound to this canonical bucket, project, region, stage, and exact source head.\n' >&2
+  printf 'Recovery token is not bound to this canonical bucket, project, region, environment, backend prefix, stage, and exact source head.\n' >&2
   exit 1
 }
 
-printf 'Network-hardening recovery token is bound to %s/%s/%s stage %s at %s.\n' \
-  "${state_bucket}" "${project}" "${region}" "${stage}" "${source_head}"
+printf 'Network-hardening recovery token is bound to %s/%s/%s environment %s backend %s stage %s at %s.\n' \
+  "${state_bucket}" "${project}" "${region}" "${environment}" \
+  "${state_prefix}" "${stage}" "${source_head}"
