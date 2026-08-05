@@ -123,7 +123,9 @@ Do not apply this branch merely because validation is green.
    the state marker can advance. The shared rollout lease remains held until the affected MIG is
    stable and has reached its target version. Never reuse a checkpoint or plan for another stage.
    If apply or convergence fails, the persisted marker remains at the prior stage: correct the
-   in-boundary cause. Once Terraform apply has started, any timeout, interruption, or unverifiable
+   in-boundary cause. If apply advances the marker but the post-apply plan finds same-stage drift,
+   the bounded retry accepts only a no-op current-stage marker while the forced sentinel replacement
+   re-proves convergence. Once Terraform apply has started, any timeout, interruption, or unverifiable
    post-apply result preserves the generation-bound shared lease and its private recovery directory.
    Prove the original process is no longer running, create a fresh checkpoint for the same stage,
    then run:

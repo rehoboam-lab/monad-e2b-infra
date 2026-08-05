@@ -92,23 +92,39 @@ marker_count="$(jq --arg address "${marker_address}" '[.resource_changes[]? | se
 }
 jq -e \
   --arg address "${marker_address}" \
+  --arg completion "${completion_address}" \
   --arg stage "${stage}" \
   --arg previous "${previous}" '
-    .resource_changes[]
+    . as $plan
+    | ($plan.resource_changes[] | select(.address == $completion)) as $completion_change
+    | $plan.resource_changes[]
     | select(.address == $address)
     | .change.after.input == $stage
     and (
-      if $stage == "network"
-      then (.change.before == null or .change.before.input == $previous)
-      else .change.before.input == $previous
-      end
-    )
-    and (
-      .change.actions == ["create"]
-      or .change.actions == ["update"]
+      (
+        (
+          if $stage == "network"
+          then (.change.before == null or .change.before.input == $previous)
+          else .change.before.input == $previous
+          end
+        )
+        and (
+          .change.actions == ["create"]
+          or .change.actions == ["update"]
+        )
+      )
+      or (
+        .change.before.input == $stage
+        and .change.actions == ["no-op"]
+        and $completion_change.change.before.input == $stage
+        and (
+          $completion_change.change.actions == ["delete", "create"]
+          or $completion_change.change.actions == ["create", "delete"]
+        )
+      )
     )
   ' <<<"${plan_json}" >/dev/null || {
-  printf 'Network-hardening stage must advance exactly %s -> %s in Terraform state.\n' \
+  printf 'Network-hardening stage must advance exactly %s -> %s or remain a no-op during a forced-convergence retry.\n' \
     "${previous}" "${stage}" >&2
   exit 1
 }

@@ -1325,6 +1325,34 @@ expect_fail "direct recovery refuses Terraform post-apply drift" \
     CONFIRM='RELEASE NETWORK HARDENING LEASE network'
 test -f "${cluster_recovery_token}"
 test "$(grep -c '^release ' "${workflow_lease_log}" || true)" -eq 0
+
+# Model the real retry plan after the successful apply has persisted the
+# current stage marker. The marker is now a no-op, while -replace forces the
+# convergence sentinel to run again before the bounded firewall repair.
+cp "${WORKFLOW_PLAN_FIXTURE}" "${test_dir}/workflow-cluster-plan.initial.json"
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.os_login_operator_access_guard")
+    | .change.actions) = ["no-op"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.os_login_operator_access_guard")
+    | .change.before) = {input: true}
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.actions) = ["delete", "create"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before) = {input: "network"}
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.actions) = ["no-op"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.before) = {input: "network"}
+' "${test_dir}/workflow-cluster-plan.initial.json" \
+  >"${WORKFLOW_PLAN_FIXTURE}.retry"
+mv "${WORKFLOW_PLAN_FIXTURE}.retry" "${WORKFLOW_PLAN_FIXTURE}"
+chmod 0600 "${WORKFLOW_PLAN_FIXTURE}"
 printf 'pass\n' >"${workflow_mode}"
 expect_pass "post-drift recovery creates a fresh reviewed plan under the held lease" \
   run_workflow_make workload-cluster-plan \
@@ -1362,6 +1390,8 @@ test ! -e "${workflow_cluster_manifest}"
 test ! -e "${cluster_recovery_token}"
 test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 1
 rm -rf -- "${cluster_recovery_dir}"
+cp "${test_dir}/workflow-cluster-plan.initial.json" "${WORKFLOW_PLAN_FIXTURE}"
+chmod 0600 "${WORKFLOW_PLAN_FIXTURE}"
 
 printf 'pass\n' >"${workflow_mode}"
 expect_pass "new reviewed cluster plan follows completed recovery" \

@@ -207,11 +207,50 @@ jq '
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/marker-retry.plan" "${fake_terraform}" server >/dev/null
 
+# A successful apply can advance the marker and still leave same-stage drift
+# for the post-apply plan to detect. The borrowed-token retry must accept the
+# current marker as a no-op while the forced sentinel replacement re-proves
+# live convergence before the remaining bounded mutation is applied.
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before.input) = "server"
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.before.input) = "server"
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.actions) = ["no-op"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.server")
+    | .change.actions) = ["no-op"]
+' "${test_dir}/server.plan" >"${test_dir}/post-apply-drift-retry.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/post-apply-drift-retry.plan" "${fake_terraform}" server >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.actions) = ["update"]
+' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/post-apply-marker-update.plan"
+expect_fail "same-stage retry cannot mutate the persisted marker" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/post-apply-marker-update.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before.input) = "network"
+' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/mismatched-current-marker.plan"
+expect_fail "current-stage marker requires current-stage convergence replacement" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/mismatched-current-marker.plan" "${fake_terraform}" server
+
 jq '
   (.resource_changes[]
     | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
     | .change.actions) = ["no-op"]
-' "${test_dir}/marker-retry.plan" >"${test_dir}/marker-retry-without-convergence.plan"
+' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/marker-retry-without-convergence.plan"
 expect_fail "marker retry without forced convergence replacement" \
   "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/marker-retry-without-convergence.plan" "${fake_terraform}" server

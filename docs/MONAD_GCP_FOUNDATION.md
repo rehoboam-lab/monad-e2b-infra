@@ -153,6 +153,9 @@ apply. Worker and build checkpoints require a drained target, zero allocations, 
 Server/API checkpoints require quorum/load-balancer and target-pool health. The stage plan retains
 the environment, backend, toolchain, artifact, topology, quota, provenance, and shared mutation
 lease checks of the complete release. It does not revive the legacy `plan-without-jobs` path.
+If a successful apply advances the marker but its post-apply plan detects same-stage drift, a
+generation-bound borrowed-token retry accepts the current marker only as a no-op and forcibly
+replaces the convergence sentinel before applying any remaining in-boundary mutation.
 
 The cluster plan and apply derive quota admission from the same reviewed saved
 plan. If every positive-capacity MIG already has the exact reviewed base size
