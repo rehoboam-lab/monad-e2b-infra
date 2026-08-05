@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plan_path="${1:?usage: assert-network-hardening-normal-plan.sh PLAN TERRAFORM_BIN}"
+plan_path="${1:?usage: assert-network-hardening-normal-plan.sh PLAN TERRAFORM_BIN ENVIRONMENT}"
 terraform_bin="${2:-terraform}"
+expected_environment="${3:?usage: assert-network-hardening-normal-plan.sh PLAN TERRAFORM_BIN ENVIRONMENT}"
+
+[[ "${expected_environment}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+  printf 'Invalid expected environment for ordinary workload plan: %s\n' \
+    "${expected_environment}" >&2
+  exit 1
+}
 
 plan_json="$(${terraform_bin} show -json "${plan_path}")"
 jq -e '.errored != true' <<<"${plan_json}" >/dev/null || {
@@ -27,25 +34,49 @@ assert_stable_stage_resource() {
     exit 1
   }
 
-  jq -e --arg address "${address}" '
-    .resource_changes[]
-    | select(.address == $address)
-    | .mode == "managed"
-      and .type == "terraform_data"
-      and .change.actions == ["no-op"]
-      and .change.before.input == .change.after.input
-      and (
-        .change.after.input == "network"
-        or .change.after.input == "server"
-        or .change.after.input == "api"
-        or .change.after.input == "worker"
-        or .change.after.input == "build"
-      )
-  ' <<<"${plan_json}" >/dev/null || {
-    printf '%s may not initialize, advance, regress, or remain disabled in an ordinary workload plan; use the reviewed staged cluster workflow.\n' \
-      "${label}" >&2
-    exit 1
-  }
+  if [[ "${expected_environment}" == "dev" ]]; then
+    jq -e --arg address "${address}" '
+      .resource_changes[]
+      | select(.address == $address)
+      | .mode == "managed"
+        and .type == "terraform_data"
+        and .change.actions == ["no-op"]
+        and .change.before.input == .change.after.input
+        and (
+          .change.after.input == "network"
+          or .change.after.input == "server"
+          or .change.after.input == "api"
+          or .change.after.input == "worker"
+          or .change.after.input == "build"
+        )
+    ' <<<"${plan_json}" >/dev/null || {
+      printf '%s may not initialize, advance, regress, or remain disabled in an ordinary dev workload plan; use the reviewed staged cluster workflow.\n' \
+        "${label}" >&2
+      exit 1
+    }
+  else
+    jq -e --arg address "${address}" '
+      .resource_changes[]
+      | select(.address == $address)
+      | .mode == "managed"
+        and .type == "terraform_data"
+        and .change.after.input == "disabled"
+        and (
+          (
+            .change.actions == ["no-op"]
+            and .change.before.input == "disabled"
+          )
+          or (
+            .change.actions == ["create"]
+            and .change.before == null
+          )
+        )
+    ' <<<"${plan_json}" >/dev/null || {
+      printf '%s in non-dev environment %s may only initialize or remain stable at disabled in an ordinary workload plan.\n' \
+        "${label}" "${expected_environment}" >&2
+      exit 1
+    }
+  fi
 }
 
 assert_stable_stage_resource \
@@ -71,7 +102,7 @@ marker_stage="$(jq -r --arg address "${marker_address}" '
 # intent on every managed fleet template while allowing unrelated reviewed
 # template replacements (for example, an image revision) to proceed.
 template_expectations="$(jq -cn --arg stage "${marker_stage}" '
-  {network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
+  {disabled: 0, network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
   | ($rank[$stage]) as $current
   | [
       {address:"module.cluster.google_compute_instance_template.server", enabled:($current >= 2)},
@@ -105,5 +136,10 @@ jq -e --argjson expected "${template_expectations}" '
   exit 1
 }
 
-printf 'Ordinary workload plan preserves completed network-hardening stage: %s.\n' \
-  "${marker_stage}"
+if [[ "${expected_environment}" == "dev" ]]; then
+  printf 'Ordinary dev workload plan preserves completed network-hardening stage: %s.\n' \
+    "${marker_stage}"
+else
+  printf 'Ordinary non-dev workload plan preserves network-hardening stage disabled: %s.\n' \
+    "${expected_environment}"
+fi

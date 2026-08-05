@@ -15,7 +15,7 @@ make_plan() {
   local output="$2"
 
   jq -n --arg stage "${stage}" '
-    {network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
+    {disabled: 0, network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
     | [
         {address:"module.cluster.google_compute_instance_template.server", role_rank:2},
         {address:"module.cluster.google_compute_instance_template.api", role_rank:3},
@@ -72,9 +72,11 @@ expect_failure() {
   local name="$1"
   local expected="$2"
   local plan="$3"
+  local environment="${4:-dev}"
   local output="${test_dir}/${name}.output"
 
-  if "${assertion_script}" "${plan}" "${fake_terraform}" >"${output}" 2>&1; then
+  if "${assertion_script}" \
+    "${plan}" "${fake_terraform}" "${environment}" >"${output}" 2>&1; then
     printf 'Expected %s to fail.\n' "${name}" >&2
     exit 1
   fi
@@ -87,15 +89,48 @@ expect_failure() {
 
 make_plan build "${test_dir}/valid.json"
 "${assertion_script}" \
-  "${test_dir}/valid.json" "${fake_terraform}" >"${test_dir}/valid.output"
+  "${test_dir}/valid.json" "${fake_terraform}" dev >"${test_dir}/valid.output"
 grep -F 'preserves completed network-hardening stage: build' \
   "${test_dir}/valid.output" >/dev/null
 
 make_plan disabled "${test_dir}/disabled.json"
 expect_failure \
   disabled \
-  'may not initialize, advance, regress, or remain disabled' \
+  'may not initialize, advance, regress, or remain disabled in an ordinary dev workload plan' \
   "${test_dir}/disabled.json"
+
+"${assertion_script}" \
+  "${test_dir}/disabled.json" "${fake_terraform}" staging \
+  >"${test_dir}/non-dev-disabled.output"
+grep -F 'preserves network-hardening stage disabled: staging' \
+  "${test_dir}/non-dev-disabled.output" >/dev/null
+
+jq '
+  .resource_changes |= map(
+    if .type == "terraform_data" then
+      .change.actions = ["create"]
+      | .change.before = null
+    else
+      .
+    end
+  )
+' "${test_dir}/disabled.json" >"${test_dir}/non-dev-initial.json"
+"${assertion_script}" \
+  "${test_dir}/non-dev-initial.json" "${fake_terraform}" prod \
+  >"${test_dir}/non-dev-initial.output"
+grep -F 'preserves network-hardening stage disabled: prod' \
+  "${test_dir}/non-dev-initial.output" >/dev/null
+
+expect_failure \
+  non-dev-enabled \
+  'in non-dev environment staging may only initialize or remain stable at disabled' \
+  "${test_dir}/valid.json" \
+  staging
+
+expect_failure \
+  dev-disabled-initialization \
+  'may not initialize, advance, regress, or remain disabled in an ordinary dev workload plan' \
+  "${test_dir}/non-dev-initial.json"
 
 jq '
   (.resource_changes[]
@@ -107,7 +142,7 @@ jq '
 ' "${test_dir}/valid.json" >"${test_dir}/reverse.json"
 expect_failure \
   reverse \
-  'may not initialize, advance, regress, or remain disabled' \
+  'may not initialize, advance, regress, or remain disabled in an ordinary dev workload plan' \
   "${test_dir}/reverse.json"
 
 jq '
@@ -120,7 +155,7 @@ jq '
 ' "${test_dir}/valid.json" >"${test_dir}/skip.json"
 expect_failure \
   skip \
-  'may not initialize, advance, regress, or remain disabled' \
+  'may not initialize, advance, regress, or remain disabled in an ordinary dev workload plan' \
   "${test_dir}/skip.json"
 
 jq '

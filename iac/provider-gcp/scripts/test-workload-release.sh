@@ -1552,6 +1552,8 @@ grep -F 'chmod 0600 "$${temp_plan}"' <<<"${workload_plan_recipe}" >/dev/null
 grep -F './scripts/assert-workload-plan.sh' <<<"${workload_plan_recipe}" >/dev/null
 grep -F './scripts/assert-network-hardening-normal-plan.sh' \
   <<<"${workload_plan_recipe}" >/dev/null
+grep -F '"$(TERRAFORM_ENVIRONMENT)"' \
+  <<<"${workload_plan_recipe}" >/dev/null
 grep -F './scripts/assert-workload-quota.sh' <<<"${workload_plan_recipe}" >/dev/null
 grep -F '"$(WORKLOAD_ROLLOUT_LEASE)" acquire' \
   <<<"${workload_plan_recipe}" >/dev/null
@@ -1599,6 +1601,8 @@ grep -F 'cmp -s "$(WORKLOAD_PLAN)" "$${apply_plan}"' \
   <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-plan.sh' <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-network-hardening-normal-plan.sh' \
+  <<<"${workload_apply_recipe}" >/dev/null
+grep -F '"$(TERRAFORM_ENVIRONMENT)"' \
   <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-quota.sh' <<<"${workload_apply_recipe}" >/dev/null
 grep -F './scripts/assert-workload-artifacts.sh' <<<"${workload_apply_recipe}" >/dev/null

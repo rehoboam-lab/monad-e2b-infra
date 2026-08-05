@@ -196,7 +196,7 @@ workload-plan-check:
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${artifacts}"; \
 		./scripts/assert-network-hardening-normal-plan.sh \
-			"$(WORKLOAD_PLAN)" "$(TF)"
+			"$(WORKLOAD_PLAN)" "$(TF)" "$(TERRAFORM_ENVIRONMENT)"
 
 workload-prerequisite-plan-check:
 	@ test -f "$(WORKLOAD_PREREQUISITE_PLAN_MANIFEST)" || (printf "Missing workload prerequisite plan provenance %s.\n" "$(WORKLOAD_PREREQUISITE_PLAN_MANIFEST)"; exit 1)
@@ -978,7 +978,7 @@ workload-plan:
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${after_artifacts}"; \
 		./scripts/assert-network-hardening-normal-plan.sh \
-			"$${temp_plan}" "$(TF)"; \
+			"$${temp_plan}" "$(TF)" "$(TERRAFORM_ENVIRONMENT)"; \
 		./scripts/assert-workload-quota.sh \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCLOUD)" \
@@ -1089,7 +1089,7 @@ workload-apply:
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${before_artifacts}"; \
 		./scripts/assert-network-hardening-normal-plan.sh \
-			"$${apply_plan}" "$(TF)"; \
+			"$${apply_plan}" "$(TF)" "$(TERRAFORM_ENVIRONMENT)"; \
 		./scripts/assert-workload-quota.sh \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" \
 			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCLOUD)" \
