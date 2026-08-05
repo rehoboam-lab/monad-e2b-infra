@@ -133,10 +133,24 @@ Do not apply this branch merely because validation is green.
      CONFIRM='RELEASE NETWORK HARDENING LEASE <stage>'
    ```
 
-   The recovery command re-proves live
-   firewall/MIG convergence before releasing that exact lease. Then create a fresh reviewed plan
-   and retry the same stage. Reverse-stage plans remain fail-closed; do not bypass the workflow for
-   an ad hoc rollback.
+   The recovery command re-proves live firewall/MIG convergence and requires a clean scoped
+   Terraform post-plan before releasing that exact lease. If Terraform still has same-stage drift,
+   it leaves the lease held. Use the same token to create and review the bounded retry plan, then
+   apply it under the still-held lease:
+
+   ```bash
+   make workload-cluster-plan WORKLOAD_CLUSTER_STAGE=<stage> \
+     WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
+     WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token>
+   make workload-cluster-apply WORKLOAD_CLUSTER_STAGE=<stage> \
+     WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
+     WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token> \
+     CONFIRM='APPLY NETWORK HARDENING <stage>'
+   ```
+
+   The apply releases the borrowed token only after the normal live-convergence and clean-post-plan
+   proofs pass. Reverse-stage plans remain fail-closed; do not bypass the workflow for an ad hoc
+   rollback.
 7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
    Cloud NAT, and zero leaked workcells before proceeding.
@@ -144,6 +158,13 @@ Do not apply this branch merely because validation is green.
    selected environment. Only after every fleet node is on the `build` stage should the legacy project
    `ssh-keys` metadata be removed in a separate reviewed operation with a rollback principal
    already proven.
+
+The ordinary full `workload-plan` and `workload-apply` paths never initialize or change this
+stage. They require the convergence sentinel and state marker to be identical, non-disabled
+no-ops in the reviewed plan. Any disabled, forward, skipped, reverse, or mismatched stage is
+rejected before publication and again before apply. Use only the cluster workflow above for a
+stage transition, and persist the proven stage in the selected environment before returning to
+ordinary workload changes.
 
 The repository does not grant operator IAM because the authoritative operator group is an external
 ownership decision. Until that principal is named and the canary proof passes, the Terraform guard

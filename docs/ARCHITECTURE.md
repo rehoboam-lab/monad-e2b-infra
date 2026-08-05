@@ -432,7 +432,10 @@ flowchart TB
   stage until the affected MIG is stable and has reached its target version, and the shared rollout
   lease remains held through that proof. If apply starts but that proof is interrupted or times
   out, the generation-bound lease and recovery token remain held until an explicit recovery command
-  re-proves convergence. This prevents both operator lockout and concurrent
+  re-proves convergence and a clean Terraform post-plan, or a fresh reviewed same-stage retry runs
+  under the borrowed token. Ordinary full workload plans require the convergence sentinel and
+  state marker to remain matching, non-disabled no-ops; they cannot initialize, advance, skip, or
+  reverse the staged rollout. This prevents both operator lockout and concurrent
   PROACTIVE replacement of every pool. The public load balancer is the only
   application ingress path. See
   [`MONAD_GCP_NETWORK_HARDENING.md`](MONAD_GCP_NETWORK_HARDENING.md) for the live audit and rollout
