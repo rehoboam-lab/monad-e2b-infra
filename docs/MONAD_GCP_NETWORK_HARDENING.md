@@ -118,7 +118,9 @@ Do not apply this branch merely because validation is green.
    ```
 
    The reviewed plan must contain only the exact stage mutation plus the in-module guard and
-   convergence/state sentinels. The shared rollout lease remains held until the affected MIG is
+   convergence/state sentinels. The cluster plan forces replacement of the convergence sentinel on
+   every attempt, including a marker-only retry, so the apply graph re-proves the live fleet before
+   the state marker can advance. The shared rollout lease remains held until the affected MIG is
    stable and has reached its target version. Never reuse a checkpoint or plan for another stage.
    If apply or convergence fails, the persisted marker remains at the prior stage: correct the
    in-boundary cause. Once Terraform apply has started, any timeout, interruption, or unverifiable

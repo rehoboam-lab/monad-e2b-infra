@@ -1207,6 +1207,8 @@ cluster_initial_plan_command="$(
 )"
 grep -F -- '-target=module.cluster' \
   <<<"${cluster_initial_plan_command}" >/dev/null
+grep -F -- "-replace=module.cluster.terraform_data.network_hardening_rollout_completion" \
+  <<<"${cluster_initial_plan_command}" >/dev/null
 if grep -Eq -- '(^|[[:space:]])-destroy(=|[[:space:]]|$)' \
   <<<"${cluster_initial_plan_command}"; then
   printf 'cluster workflow fixture observed a destroy plan\n' >&2
@@ -1375,6 +1377,8 @@ cluster_wait_recipe="$(
 grep -F 'rm -f -- "$(WORKLOAD_CLUSTER_PLAN)" "$(WORKLOAD_CLUSTER_PLAN_MANIFEST)"' \
   <<<"${cluster_plan_recipe}" >/dev/null
 grep -F -- '-target=module.cluster' <<<"${cluster_plan_recipe}" >/dev/null
+grep -F -- "\$(WORKLOAD_CLUSTER_COMPLETION_REPLACE)" \
+  <<<"${cluster_plan_recipe}" >/dev/null
 grep -F '"$${after_artifacts}" cluster' <<<"${cluster_plan_recipe}" >/dev/null
 grep -F './scripts/select-workload-quota-mode.sh' \
   <<<"${cluster_plan_recipe}" >/dev/null

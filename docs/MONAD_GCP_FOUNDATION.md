@@ -136,10 +136,12 @@ mise exec -- make -C iac/provider-gcp workload-cluster-apply \
 mise exec -- make -C iac/provider-gcp workload-cluster-wait
 ```
 
-`workload-cluster-plan` uses the exact Terraform target `-target=module.cluster`, but the target no
-longer authorizes the whole module to mutate at once. The OS Login authorization guard is inside
-that module and is an explicit dependency of every replacement path. A Terraform-state marker must
-advance exactly one step. A second assertion permits only the two firewall updates for `network`,
+`workload-cluster-plan` uses the exact Terraform target `-target=module.cluster` and forces the
+in-graph convergence sentinel to be replaced on every reviewed attempt, but the target no longer
+authorizes the whole module to mutate at once. The OS Login authorization guard is inside that
+module and is an explicit dependency of every replacement path. A Terraform-state marker must
+advance exactly one step only after the sentinel has re-proved live convergence. A second assertion
+permits only the two firewall updates for `network`,
 or one PROACTIVE pool's template/MIG pair for `server`, `api`, `worker`, or `build` (the zero-sized
 Loki/ClickHouse templates are adopted with `build`). Any concurrent pool, generic autoscaler,
 worker-MIG ownership, or unrelated drift fails closed.

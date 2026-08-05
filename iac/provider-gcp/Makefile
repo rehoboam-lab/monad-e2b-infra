@@ -123,6 +123,7 @@ WORKLOAD_CLUSTER_CHECKPOINT ?=
 WORKLOAD_CLUSTER_RECOVERY_TOKEN ?=
 override WORKLOAD_CLUSTER_PLAN := .tfplan.workload-cluster.$(WORKLOAD_CLUSTER_STAGE).$(ENV)
 override WORKLOAD_CLUSTER_PLAN_MANIFEST := $(WORKLOAD_CLUSTER_PLAN).manifest
+override WORKLOAD_CLUSTER_COMPLETION_REPLACE := -replace='module.cluster.terraform_data.network_hardening_rollout_completion'
 override WORKLOAD_TOPOLOGY_POLICY := topology/minimal-workload-policy.json
 override WORKLOAD_PACKER_TEMPLATE := nomad-cluster-disk-image/main.pkr.hcl
 override WORKLOAD_IMAGE_REVISION := $(CORE_IMAGE_REVISION)
@@ -399,6 +400,7 @@ workload-cluster-plan:
 		$(tf_vars) TF_VAR_network_hardening_rollout_stage="$(WORKLOAD_CLUSTER_STAGE)" \
 			$(TF) plan $(TF_VAR_FILE_ARG) \
 			-target=module.cluster \
+			$(WORKLOAD_CLUSTER_COMPLETION_REPLACE) \
 			-out="$${temp_plan}" \
 			-input=false \
 			-compact-warnings; \

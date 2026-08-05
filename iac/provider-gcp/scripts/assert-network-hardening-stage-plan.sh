@@ -74,8 +74,7 @@ jq -e \
       or (
         .change.before.input == $stage
         and (
-          .change.actions == ["no-op"]
-          or .change.actions == ["delete", "create"]
+          .change.actions == ["delete", "create"]
           or .change.actions == ["create", "delete"]
         )
       )

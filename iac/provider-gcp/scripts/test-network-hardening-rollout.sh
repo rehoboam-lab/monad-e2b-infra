@@ -189,13 +189,11 @@ jq '
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/partial-retry.plan" "${fake_terraform}" server >/dev/null
 
-# If convergence completed but persisting the marker failed, the sentinel is
-# already valid and every pool resource can be a no-op on the retry.
+# If convergence completed but persisting the marker failed, every pool
+# resource can be a no-op on the retry, but the sentinel must still be replaced
+# so live convergence is re-proven inside the apply graph.
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
-    | .change.actions) = ["no-op"]
-  | (.resource_changes[]
     | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
     | .change.before.input) = "server"
   | (.resource_changes[]
@@ -207,6 +205,15 @@ jq '
 ' "${test_dir}/server.plan" >"${test_dir}/marker-retry.plan"
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/marker-retry.plan" "${fake_terraform}" server >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.actions) = ["no-op"]
+' "${test_dir}/marker-retry.plan" >"${test_dir}/marker-retry-without-convergence.plan"
+expect_fail "marker retry without forced convergence replacement" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/marker-retry-without-convergence.plan" "${fake_terraform}" server
 
 jq '(.resource_changes[] | select(.address == "module.cluster.terraform_data.os_login_operator_access_guard") | .change.after.input) = false' \
   "${test_dir}/server.plan" >"${test_dir}/closed.plan"
