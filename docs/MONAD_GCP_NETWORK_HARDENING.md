@@ -153,7 +153,7 @@ Do not apply this branch merely because validation is green.
    The apply releases the borrowed token only after the normal live-convergence and clean-post-plan
    proofs pass. Borrowed planning, recovery, and every apply first prove that the canonical GCS
    lease object still matches the private token's exact scope, generation, and holder; stale,
-   copied, replaced, or wrong-bucket tokens fail before mutation. Reverse-stage plans remain
+   replaced, or wrong-scope token copies fail before mutation. Reverse-stage plans remain
    fail-closed; do not bypass the workflow for an ad hoc rollback.
 7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
