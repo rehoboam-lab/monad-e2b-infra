@@ -59,9 +59,12 @@ resource "terraform_data" "os_login_operator_access_guard" {
     precondition {
       condition = (
         var.network_hardening_rollout_stage == "disabled"
-        || var.os_login_operator_access_confirmed
+        || (
+          var.environment == "dev"
+          && var.os_login_operator_access_confirmed
+        )
       )
-      error_message = "OS Login rollout is gated: grant and prove roles/iap.tunnelResourceAccessor plus roles/compute.osAdminLogin for the operator principal, then explicitly confirm access through the guarded staged workflow."
+      error_message = "OS Login rollout is restricted to the dev invited-beta fleet and gated on proven operator access: keep the stage disabled outside dev; in dev, grant and prove roles/iap.tunnelResourceAccessor plus roles/compute.osAdminLogin before explicitly confirming the guarded staged workflow."
     }
   }
 }
@@ -81,9 +84,12 @@ resource "terraform_data" "network_hardening_rollout_completion" {
     precondition {
       condition = (
         var.network_hardening_rollout_stage == "disabled"
-        || var.os_login_operator_access_confirmed
+        || (
+          var.environment == "dev"
+          && var.os_login_operator_access_confirmed
+        )
       )
-      error_message = "Network hardening stages require proven IAP and OS Login operator access."
+      error_message = "Network hardening stages are dev-only and require proven IAP and OS Login operator access."
     }
   }
 
@@ -123,9 +129,12 @@ resource "terraform_data" "network_hardening_rollout_stage" {
     precondition {
       condition = (
         var.network_hardening_rollout_stage == "disabled"
-        || var.os_login_operator_access_confirmed
+        || (
+          var.environment == "dev"
+          && var.os_login_operator_access_confirmed
+        )
       )
-      error_message = "Network hardening stages require proven IAP and OS Login operator access."
+      error_message = "Network hardening stages are dev-only and require proven IAP and OS Login operator access."
     }
   }
 

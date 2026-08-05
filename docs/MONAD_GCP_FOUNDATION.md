@@ -123,6 +123,10 @@ strictly serialized as `network`, `server`, `api`, `worker`, then `build`; this 
 greenfield cluster creator or a replacement for the complete one-workcell release. A fresh private
 checkpoint is required for each stage. For example:
 
+This staged path is deliberately restricted to the `dev` invited-beta environment. Non-dev plans
+fail before mutation and retain their upstream opportunistic MIG policies until a separate rollout
+strategy is reviewed.
+
 ```bash
 mise exec -- make -C iac/provider-gcp workload-cluster-plan \
   WORKLOAD_CLUSTER_STAGE=network \

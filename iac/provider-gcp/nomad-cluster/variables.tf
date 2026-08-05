@@ -150,7 +150,7 @@ variable "monad_worker_autoscaler_shadow_enabled" {
 
 variable "network_hardening_rollout_stage" {
   type        = string
-  description = "Serial state-backed stage controlling network hardening and OS Login template adoption."
+  description = "Dev invited-beta serial state-backed stage controlling network hardening and OS Login template adoption; non-dev environments must remain disabled."
 
   validation {
     condition = contains([

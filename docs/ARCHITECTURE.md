@@ -435,7 +435,9 @@ flowchart TB
   re-proves convergence and a clean Terraform post-plan, or a fresh reviewed same-stage retry runs
   under the borrowed token. Ordinary full workload plans require the convergence sentinel and
   state marker to remain matching, non-disabled no-ops; they cannot initialize, advance, skip, or
-  reverse the staged rollout. This prevents both operator lockout and concurrent
+  reverse the staged rollout. The staged workflow is hard-failed outside the current `dev`
+  invited-beta environment, so non-dev retains its upstream opportunistic MIG policy pending a
+  separately reviewed replacement strategy. This prevents both operator lockout and concurrent
   PROACTIVE replacement of every pool. The public load balancer is the only
   application ingress path. See
   [`MONAD_GCP_NETWORK_HARDENING.md`](MONAD_GCP_NETWORK_HARDENING.md) for the live audit and rollout

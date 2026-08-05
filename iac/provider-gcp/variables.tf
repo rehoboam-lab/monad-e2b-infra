@@ -328,7 +328,7 @@ variable "os_login_operator_access_confirmed" {
 
 variable "network_hardening_rollout_stage" {
   type        = string
-  description = "State-backed, serial network/OS Login rollout stage. Only the guarded saved-plan workflow may advance this value."
+  description = "Dev invited-beta state-backed serial network/OS Login rollout stage. Non-dev environments must remain disabled; only the guarded saved-plan workflow may advance it."
   default     = "disabled"
 
   validation {

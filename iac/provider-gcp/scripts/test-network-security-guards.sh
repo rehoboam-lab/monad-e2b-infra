@@ -113,6 +113,10 @@ grep -F 'default     = false' <<<"${os_login_variable}" >/dev/null
 grep -F 'default     = "disabled"' <<<"${stage_variable}" >/dev/null
 grep -F 'resource "terraform_data" "os_login_operator_access_guard"' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
+grep -F 'var.environment == "dev"' \
+  "${provider_root}/nomad-cluster/main.tf" >/dev/null
+grep -F 'restricted to the dev invited-beta fleet' \
+  "${provider_root}/nomad-cluster/main.tf" >/dev/null
 grep -F 'roles/iap.tunnelResourceAccessor plus roles/compute.osAdminLogin' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
 grep -F 'terraform_data.os_login_operator_access_guard' \
@@ -129,15 +133,26 @@ grep -F 'NETWORK_HARDENING_ROLLOUT_STAGE=disabled' "${repo_root}/.env.gcp.templa
 
 mkdir "${test_dir}/cluster"
 {
-  printf '%s\n' "${os_login_variable}" "${stage_variable}"
+  printf '%s\n' \
+    'variable "environment" {' \
+    '  type = string' \
+    '  default = "dev"' \
+    '}' \
+    "${os_login_variable}" \
+    "${stage_variable}"
   printf '%s\n' \
     'module "cluster" {' \
     '  source = "./cluster"' \
+    '  environment = var.environment' \
     '  os_login_operator_access_confirmed = var.os_login_operator_access_confirmed' \
     '  network_hardening_rollout_stage = var.network_hardening_rollout_stage' \
     '}'
 } >"${test_dir}/main.tf"
 {
+  printf '%s\n' \
+    'variable "environment" {' \
+    '  type = string' \
+    '}'
   extract_variable os_login_operator_access_confirmed \
     "${provider_root}/nomad-cluster/variables.tf"
   extract_variable network_hardening_rollout_stage \
@@ -160,7 +175,23 @@ if "${terraform_bin}" -chdir="${test_dir}" plan -input=false -lock=false -no-col
   printf 'In-module OS Login plan guard was omitted from a targeted replacement graph.\n' >&2
   exit 1
 fi
-grep -F 'OS Login rollout is gated' "${test_dir}/guard-closed.log" >/dev/null
+grep -F 'OS Login rollout is restricted to the dev invited-beta fleet' \
+  "${test_dir}/guard-closed.log" >/dev/null
+if "${terraform_bin}" -chdir="${test_dir}" plan -input=false -lock=false -no-color \
+  -target=module.cluster.terraform_data.targeted_replacement \
+  -var='environment=prod' \
+  -var='network_hardening_rollout_stage=server' \
+  -var='os_login_operator_access_confirmed=true' \
+  >"${test_dir}/non-dev-guard.log" 2>&1; then
+  printf 'Non-dev opportunistic MIG rollout escaped the dev-only plan guard.\n' >&2
+  exit 1
+fi
+grep -F 'OS Login rollout is restricted to the dev invited-beta fleet' \
+  "${test_dir}/non-dev-guard.log" >/dev/null
+"${terraform_bin}" -chdir="${test_dir}" plan -input=false -lock=false -no-color \
+  -target=module.cluster.terraform_data.targeted_replacement \
+  -var='environment=prod' \
+  -var='network_hardening_rollout_stage=disabled' >/dev/null
 "${terraform_bin}" -chdir="${test_dir}" plan -input=false -lock=false -no-color \
   -target=module.cluster.terraform_data.targeted_replacement \
   -var='network_hardening_rollout_stage=server' \
