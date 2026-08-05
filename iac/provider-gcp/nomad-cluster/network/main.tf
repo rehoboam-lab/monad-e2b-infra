@@ -540,11 +540,14 @@ resource "google_compute_firewall" "internal_remote_connection_firewall_ingress"
 
   priority = 900
 
-  # Record administrative access decisions without copying packet metadata
-  # into Cloud Logging. This rule is intentionally identical in dev: the
-  # invited-beta fleet is administered only through IAP.
-  log_config {
-    metadata = "EXCLUDE_ALL_METADATA"
+  # Add allow-decision logging only with the reviewed dev hardening rollout.
+  # Non-dev already has the IAP-only source range and must retain its prior
+  # logging shape so ordinary staging/production workload releases stay no-op.
+  dynamic "log_config" {
+    for_each = var.environment == "dev" ? [1] : []
+    content {
+      metadata = "EXCLUDE_ALL_METADATA"
+    }
   }
 
   direction   = "INGRESS"

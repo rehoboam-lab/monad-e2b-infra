@@ -422,7 +422,9 @@ flowchart TB
 - Server, API, worker, build, and optional data nodes have no per-instance public address in the
   invited-beta topology. Two reviewed static addresses back one Cloud NAT with full translation
   logging. Administrative SSH/RDP is allowed only from Google's IAP TCP-forwarding range
-  (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every dev
+  (`35.235.240.0/20`) and, on the dev invited-beta fleet, all allow/deny decisions are logged without
+  packet metadata. The IAP allow keeps its prior unlogged shape outside dev so this rollout does not
+  introduce otherwise-unapplyable staging/production drift. Every dev
   fleet instance template enables OS Login after its serial rollout stage. The authorization guard lives
   inside `module.cluster` and every replacement path depends on it, so a targeted saved plan cannot
   omit it. A convergence sentinel and state-backed marker serialize adoption as

@@ -69,7 +69,8 @@ if grep -F '0.0.0.0/0' <<<"${iap_allow}" >/dev/null; then
   exit 1
 fi
 grep -F 'ports    = ["22", "3389"]' <<<"${iap_allow}" >/dev/null
-grep -F 'log_config {' <<<"${iap_allow}" >/dev/null
+grep -F 'dynamic "log_config" {' <<<"${iap_allow}" >/dev/null
+grep -F 'for_each = var.environment == "dev" ? [1] : []' <<<"${iap_allow}" >/dev/null
 grep -F 'metadata = "EXCLUDE_ALL_METADATA"' <<<"${iap_allow}" >/dev/null
 grep -F 'var.environment != "dev"' <<<"${iap_allow}" >/dev/null
 

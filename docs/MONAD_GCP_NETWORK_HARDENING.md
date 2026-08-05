@@ -33,8 +33,9 @@ SSH-key value.
 ## Source invariants
 
 - The `orch` administrative allow is exactly `35.235.240.0/20`, ports 22/3389, priority 900.
-- The public-source administrative deny remains priority 1000. Both rules log decisions with
-  `EXCLUDE_ALL_METADATA`.
+- The public-source administrative deny remains priority 1000. On the dev invited-beta fleet both
+  rules log decisions with `EXCLUDE_ALL_METADATA`; the IAP allow retains its pre-existing unlogged
+  shape outside dev so this dev-only migration cannot block ordinary staging/production releases.
 - Server, API, worker/build, Loki, and ClickHouse instance templates add
   `enable-oslogin = "TRUE"` only when their state-backed serial stage has been reached. The API
   template no longer ignores all metadata changes.
