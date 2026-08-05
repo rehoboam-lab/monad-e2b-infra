@@ -18,7 +18,10 @@ SSH-key value.
   `e2b-orch-internal-remote-connection-firewall-ingress` at priority 900. The priority-1000
   public deny therefore still never sees those packets. The convergence sentinel rejected that
   effective state, kept the stage marker at `disabled`, and preserved the rollout lease for a
-  same-stage recovery.
+  same-stage recovery. The saved applied plan expected the replacement, but Google provider
+  v6.50.0's source-range diff suppression preserves the API's default `0.0.0.0/0` when one sole
+  source range is replaced by another. The live union is therefore provider behavior that the
+  priority-700/800 overlay must safely shadow, not evidence that the reviewed plan omitted IAP.
 - Project common metadata contains a legacy `ssh-keys` entry and no `enable-oslogin` entry. None of
   the eight live fleet instances has an instance-level `enable-oslogin` value. The effective
   `constraints/compute.requireOsLogin` response did not report enforcement.
@@ -159,8 +162,8 @@ Do not apply this branch merely because validation is green.
    Once Terraform apply has
    started, any timeout, interruption, or unverifiable post-apply result preserves the
    generation-bound shared lease and its private recovery directory.
-   Prove the original process is no longer running, create a fresh checkpoint for the same stage,
-   then run:
+   Prove the original process is no longer running. If recovery continues at the same exact Git
+   head, create a fresh checkpoint for the same stage and run:
 
    ```bash
    mise exec -- make -C iac/provider-gcp workload-cluster-recover-lease \
@@ -169,6 +172,29 @@ Do not apply this branch merely because validation is green.
      WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token> \
      CONFIRM='RELEASE NETWORK HARDENING LEASE <stage>'
    ```
+
+   A recovery lease cannot be copied to a repaired checkout: its holder is intentionally bound to
+   the exact source commit that began the failed apply. When the in-boundary repair has instead
+   landed as a reviewed descendant, use a fresh checkpoint bound to that descendant and transfer
+   the continuously held generation with the dedicated network-only command:
+
+   ```bash
+   mise exec -- make -C iac/provider-gcp workload-cluster-rebind-recovery-source \
+     WORKLOAD_CLUSTER_STAGE=network \
+     WORKLOAD_CLUSTER_CHECKPOINT=<fresh-descendant-checkpoint> \
+     WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-original-token> \
+     WORKLOAD_CLUSTER_REBOUND_TOKEN=<new-private-token-path> \
+     CONFIRM='REBIND NETWORK HARDENING LEASE network'
+   ```
+
+   The command requires a clean exact descendant, permits only the reviewed firewall repair,
+   guard, test, and runbook paths between the two commits, and atomically replaces the canonical
+   lease object under its old generation. There is no unlocked interval. The new mode-0600 token
+   captures the replacement generation and exact descendant holder; only after that succeeds is
+   the original token removed. Any unrelated diff, stale generation, wrong scope, existing output
+   path, or non-network stage fails before mutation. Use the rebound token for the bounded plan and
+   apply below. If the object transfer succeeds but replacement-token capture cannot be proven,
+   stop and inspect the canonical object; never delete or reacquire it speculatively.
 
    The recovery command re-proves live firewall/MIG convergence, exact replacement identity,
    post-replacement IAP/OS Login and stage-specific Nomad/load-balancer health, then requires a clean

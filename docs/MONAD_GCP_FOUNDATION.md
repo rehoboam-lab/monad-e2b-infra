@@ -165,6 +165,10 @@ replaces the convergence sentinel before applying any remaining in-boundary muta
 If an interruption destroys that sentinel before the marker advances, only the validated recovery
 token for the exact same stage admits its recreation; an ordinary or next-stage plan cannot use the
 missing state object to bypass serial ordering.
+When a reviewed in-boundary firewall repair must continue a held `network` lease from the failed
+source commit, `workload-cluster-rebind-recovery-source` performs a generation-matched same-object
+transfer to the exact clean descendant. It accepts no other stage or unrelated source diff and
+creates no unlocked interval; the normal recovery plan/apply path then consumes the rebound token.
 
 The cluster plan and apply derive quota admission from the same reviewed saved
 plan. If every positive-capacity MIG already has the exact reviewed base size
