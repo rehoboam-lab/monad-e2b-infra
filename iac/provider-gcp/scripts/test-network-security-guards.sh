@@ -91,6 +91,8 @@ for role in server api loki clickhouse; do
 done
 grep -F 'var.enable_os_login ? { enable-oslogin = "TRUE" } : {}' \
   "${provider_root}/nomad-cluster/worker-cluster/nodepool.tf" >/dev/null
+grep -Eq '^[[:space:]]*enable_os_login[[:space:]]*=[[:space:]]*false[[:space:]]*$' \
+  "${provider_root}/nomad-cluster/worker-cluster/autoscaler_ownership.tftest.hcl" >/dev/null
 test "$(grep -Fc 'terraform_data.os_login_operator_access_guard' \
   "${provider_root}/nomad-cluster/main.tf")" -ge 4
 grep -F 'depends_on = [terraform_data.network_hardening_rollout_completion]' \
