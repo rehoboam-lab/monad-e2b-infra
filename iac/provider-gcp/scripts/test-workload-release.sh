@@ -684,6 +684,10 @@ cp "${provider_root}/scripts/assert-workload-plan.sh" \
   "${workflow_provider}/scripts/"
 cp "${provider_root}/scripts/assert-workload-quota.sh" \
   "${workflow_provider}/scripts/"
+cp "${provider_root}/scripts/assert-network-hardening-checkpoint.sh" \
+  "${workflow_provider}/scripts/"
+cp "${provider_root}/scripts/assert-network-hardening-stage-plan.sh" \
+  "${workflow_provider}/scripts/"
 cp "${provider_root}/scripts/select-workload-quota-mode.sh" \
   "${workflow_provider}/scripts/"
 cp "${provider_root}/scripts/assert-packer-reserve.sh" \
@@ -762,6 +766,49 @@ jq '
   .resource_changes |= map(
     select(.address | startswith("module.cluster."))
   )
+  | .resource_changes |= map(
+      if .type == "google_compute_instance_template"
+      then (
+        .change.before.metadata |= del(."enable-oslogin")
+        | .change.after.metadata |= del(."enable-oslogin")
+      )
+      else .
+      end
+    )
+  | .resource_changes += [
+      {
+        address: "module.cluster.terraform_data.os_login_operator_access_guard",
+        mode: "managed",
+        type: "terraform_data",
+        change: {
+          actions: ["create"],
+          before: null,
+          after: {input: true}
+        }
+      },
+      {
+        address: "module.cluster.terraform_data.network_hardening_rollout_stage",
+        mode: "managed",
+        type: "terraform_data",
+        change: {
+          actions: ["create"],
+          before: null,
+          after: {input: "network"}
+        }
+      },
+      {
+        address: "module.cluster.module.network.google_compute_firewall.internal_remote_connection_firewall_ingress",
+        mode: "managed",
+        type: "google_compute_firewall",
+        change: {actions: ["update"], before: {}, after: {}}
+      },
+      {
+        address: "module.cluster.module.network.google_compute_firewall.remote_connection_firewall_ingress",
+        mode: "managed",
+        type: "google_compute_firewall",
+        change: {actions: ["update"], before: {}, after: {}}
+      }
+    ]
   | (
       .planned_values.root_module
       | recurse(.child_modules[]?)
@@ -784,6 +831,8 @@ PREFIX=e2b-
 CORE_IMAGE_REVISION=${revision}
 TERRAFORM_ENVIRONMENT=dev
 TERRAFORM_STATE_BUCKET=monad-code-terraform-state
+OS_LOGIN_OPERATOR_ACCESS_CONFIRMED=true
+NETWORK_HARDENING_ROLLOUT_STAGE=disabled
 EOF
 printf 'terraform 1.7.5\n' >"${workflow_repo}/.tool-versions"
 printf 'pass\n' >"${workflow_mode}"
@@ -892,6 +941,36 @@ chmod 0755 "${workflow_provider}/scripts/"*.sh
   git commit -qm fixture
 )
 
+workflow_checkpoint="${test_dir}/network-checkpoint.json"
+workflow_now="$(date -u +%s)"
+jq -n \
+  --arg head "$(git -C "${workflow_repo}" rev-parse HEAD)" \
+  --argjson now "${workflow_now}" '
+    {
+      schema_version: 1,
+      stage: "network",
+      gcp_project_id: "monad-code",
+      gcp_region: "us-east4",
+      gcp_zone: "us-east4-a",
+      prefix: "e2b-",
+      source_git_head: $head,
+      operator_principal: "operator@example.invalid",
+      observed_unix: $now,
+      expires_unix: ($now + 1800),
+      checks: {
+        control_plane_healthy: true,
+        iap_tunnel_access: true,
+        os_login_admin_access: true
+      },
+      evidence: {
+        control_plane_healthy: "fixture://control-plane",
+        iap_tunnel_access: "fixture://iap",
+        os_login_admin_access: "fixture://os-login"
+      }
+    }
+  ' >"${workflow_checkpoint}"
+chmod 0600 "${workflow_checkpoint}"
+
 export WORKFLOW_MODE_FILE="${workflow_mode}"
 export WORKFLOW_TERRAFORM_LOG="${workflow_terraform_log}"
 export WORKFLOW_LEASE_LOG="${workflow_lease_log}"
@@ -906,8 +985,18 @@ run_workflow_make() {
     GCLOUD="${fake_gcloud}" \
     MAKE="${workflow_make}" \
     SKIP_FMT=true \
+    WORKLOAD_CLUSTER_STAGE=network \
+    WORKLOAD_CLUSTER_CHECKPOINT="${workflow_checkpoint}" \
     "$@"
 }
+
+expect_fail "normal cluster stage guard rejects false OS Login authorization" \
+  make -C "${workflow_provider}" \
+  ENV=dev \
+  WORKLOAD_CLUSTER_STAGE=network \
+  WORKLOAD_CLUSTER_CHECKPOINT="${workflow_checkpoint}" \
+  OS_LOGIN_OPERATOR_ACCESS_CONFIRMED=false \
+  workload-cluster-stage-guard
 
 workflow_plan="${workflow_provider}/.tfplan.workload.dev"
 workflow_manifest="${workflow_plan}.manifest"
@@ -1000,7 +1089,7 @@ test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1
 test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 1
 test -z "$(find "${workflow_provider}" -maxdepth 1 -type d -name '.workload-apply.*' -print)"
 
-workflow_cluster_plan="${workflow_provider}/.tfplan.workload-cluster.dev"
+workflow_cluster_plan="${workflow_provider}/.tfplan.workload-cluster.network.dev"
 workflow_cluster_manifest="${workflow_cluster_plan}.manifest"
 export WORKFLOW_PLAN_FIXTURE="${test_dir}/workflow-cluster-plan.json"
 export WORKFLOW_SHARED_PLAN="${workflow_cluster_plan}"
@@ -1050,11 +1139,24 @@ expect_fail "wrong cluster apply confirmation preserves saved release" \
 test -f "${workflow_cluster_plan}"
 test -f "${workflow_cluster_manifest}"
 
+cp "${workflow_checkpoint}" "${test_dir}/network-checkpoint.original.json"
+jq '.evidence.iap_tunnel_access = "fixture://tampered"' \
+  "${workflow_checkpoint}" >"${test_dir}/network-checkpoint.tampered.json"
+mv "${test_dir}/network-checkpoint.tampered.json" "${workflow_checkpoint}"
+chmod 0600 "${workflow_checkpoint}"
+expect_fail "checkpoint-byte drift preserves saved cluster release" \
+  run_workflow_make \
+  workload-cluster-apply CONFIRM='APPLY NETWORK HARDENING network'
+test -f "${workflow_cluster_plan}"
+test -f "${workflow_cluster_manifest}"
+mv "${test_dir}/network-checkpoint.original.json" "${workflow_checkpoint}"
+chmod 0600 "${workflow_checkpoint}"
+
 : >"${workflow_lease_log}"
 printf 'apply-fail\n' >"${workflow_mode}"
 expect_fail "cluster Terraform apply failure preserves reviewed release" \
   run_workflow_make \
-  workload-cluster-apply CONFIRM='APPLY ONE WORKCELL CLUSTER'
+  workload-cluster-apply CONFIRM='APPLY NETWORK HARDENING network'
 test -f "${workflow_cluster_plan}"
 test -f "${workflow_cluster_manifest}"
 test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1
@@ -1063,7 +1165,7 @@ test "$(grep -c '^release ' "${workflow_lease_log}")" -eq 1
 printf 'post-drift\n' >"${workflow_mode}"
 expect_fail "post-apply cluster drift preserves reviewed release" \
   run_workflow_make \
-  workload-cluster-apply CONFIRM='APPLY ONE WORKCELL CLUSTER'
+  workload-cluster-apply CONFIRM='APPLY NETWORK HARDENING network'
 test -f "${workflow_cluster_plan}"
 test -f "${workflow_cluster_manifest}"
 test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 2
@@ -1073,7 +1175,7 @@ printf 'pass\n' >"${workflow_mode}"
 : >"${workflow_lease_log}"
 expect_pass "clean saved cluster-plan apply consumes release exactly once" \
   run_workflow_make \
-  workload-cluster-apply CONFIRM='APPLY ONE WORKCELL CLUSTER'
+  workload-cluster-apply CONFIRM='APPLY NETWORK HARDENING network'
 test ! -e "${workflow_cluster_plan}"
 test ! -e "${workflow_cluster_manifest}"
 test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1

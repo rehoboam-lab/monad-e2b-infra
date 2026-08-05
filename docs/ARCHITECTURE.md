@@ -423,10 +423,14 @@ flowchart TB
   invited-beta topology. Two reviewed static addresses back one Cloud NAT with full translation
   logging. Administrative SSH/RDP is allowed only from Google's IAP TCP-forwarding range
   (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every fleet
-  instance template enables OS Login. A fail-closed Terraform precondition blocks workload plans
-  until an operator explicitly confirms that IAP tunneling and OS Login administrator IAM were
-  granted and proven; replacing legacy-key nodes before that proof risks lockout. The public load
-  balancer is the only application ingress path. See
+  instance template enables OS Login after its serial rollout stage. The authorization guard lives
+  inside `module.cluster` and every replacement path depends on it, so a targeted saved plan cannot
+  omit it. A state-backed marker and exact mutation allowlist serialize adoption as
+  `network -> server -> api -> worker -> build`; each stage requires a fresh, private operator
+  checkpoint for IAP/OS Login plus the role-specific health or drain evidence. The checkpoint bytes
+  are bound into saved-plan provenance and revalidated before apply. This prevents both operator
+  lockout and concurrent PROACTIVE replacement of every pool. The public load balancer is the only
+  application ingress path. See
   [`MONAD_GCP_NETWORK_HARDENING.md`](MONAD_GCP_NETWORK_HARDENING.md) for the live audit and rollout
   procedure.
 - Every Firecracker slot installs an nftables `PREROUTING` filter on the guest tap before host

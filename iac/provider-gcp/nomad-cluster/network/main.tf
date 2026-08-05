@@ -551,6 +551,16 @@ resource "google_compute_firewall" "internal_remote_connection_firewall_ingress"
   target_tags = [var.cluster_tag_name]
   # https://googlecloudplatform.github.io/iap-desktop/setup-iap/
   source_ranges = ["35.235.240.0/20"]
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.os_login_operator_access_confirmed
+        && var.network_hardening_rollout_stage != "disabled"
+      )
+      error_message = "IAP firewall hardening requires the in-graph OS Login access guard and a reviewed rollout stage."
+    }
+  }
 }
 
 resource "google_compute_firewall" "remote_connection_firewall_ingress" {
@@ -573,6 +583,16 @@ resource "google_compute_firewall" "remote_connection_firewall_ingress" {
   direction     = "INGRESS"
   target_tags   = [var.cluster_tag_name]
   source_ranges = ["0.0.0.0/0"]
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.os_login_operator_access_confirmed
+        && var.network_hardening_rollout_stage != "disabled"
+      )
+      error_message = "Public administrative ingress denial requires the in-graph OS Login access guard and a reviewed rollout stage."
+    }
+  }
 }
 
 

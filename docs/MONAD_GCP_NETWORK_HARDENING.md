@@ -35,10 +35,20 @@ SSH-key value.
 - The `orch` administrative allow is exactly `35.235.240.0/20`, ports 22/3389, priority 900.
 - The public-source administrative deny remains priority 1000. Both rules log decisions with
   `EXCLUDE_ALL_METADATA`.
-- Server, API, worker/build, Loki, and ClickHouse instance templates set
-  `enable-oslogin = "TRUE"`. The API template no longer ignores all metadata changes.
-- `os_login_operator_access_confirmed` defaults to false. Its Terraform precondition prevents any
-  workload plan until the reviewed inputs explicitly set it true.
+- Server, API, worker/build, Loki, and ClickHouse instance templates add
+  `enable-oslogin = "TRUE"` only when their state-backed serial stage has been reached. The API
+  template no longer ignores all metadata changes.
+- `os_login_operator_access_confirmed` defaults to false. Its precondition is inside
+  `module.cluster`; every template path and both administrative firewalls consume that in-graph
+  guard. A direct or normal `-target=module.cluster` plan therefore cannot omit it.
+- The rollout marker permits exactly `disabled -> network -> server -> api -> worker -> build`.
+  The stage-plan assertion requires the exact firewall or pool mutation set, rejects all other
+  drift, and retains the existing topology, quota, worker-MIG, and generic-autoscaler ownership
+  checks.
+- Every stage requires a mode-0600, non-symlink checkpoint bound to the exact project, region,
+  zone, prefix, Git head, named operator, and a maximum one-hour validity window. Its checks and
+  evidence are stage-specific. The complete checkpoint and digest are embedded in the saved-plan
+  manifest and revalidated before apply.
 - Guest private/control-plane denies run on the tap before host NAT and before tenant allow rules.
   The host's own metadata ADC path does not traverse that tap rule.
 - `make -C iac/provider-gcp network-security-check` guards all of these source relationships and
@@ -52,8 +62,11 @@ The local branch passed the following checks before handoff:
   configuration.
 - The complete workload plan-assertion fixture suite, including quota, mutation-lease, release,
   cluster-readiness, template-manager, and worker-startup guards.
-- `network-security-check`, including a real minimal Terraform plan that fails with the OS Login
-  confirmation omitted and succeeds with explicit confirmation.
+- `network-security-check`, including a real targeted child-module plan that proves the in-graph
+  OS Login guard blocks a replacement when confirmation is false.
+- Serial rollout fixtures for every allowed transition, exact mutation boundaries, fresh
+  checkpoints, skipped-stage rejection, closed-guard rejection, and protection of generic
+  autoscaler ownership.
 - The complete Linux `packages/orchestrator/pkg/sandbox/network` suite in a privileged container,
   including real network-namespace, iptables, and nftables tests.
 - The complete Linux `packages/orchestrator/pkg/tcpfirewall` suite with its Docker-backed listener
@@ -69,18 +82,46 @@ Do not apply this branch merely because validation is green.
    explicitly if inheritance is intentional.
 2. Prove an IAP TCP tunnel and OS Login administrative SSH on a disposable instance built from an
    OS-Login-enabled candidate template. Do not use a production worker as the first proof.
-3. Add `os_login_operator_access_confirmed = true` to the reviewed, non-secret workload inputs only
-   after that evidence exists. The default false value is intentional.
-4. Produce the normal provenance-bound saved Terraform plan. It must contain the two bounded
-   firewall updates and the expected instance-template replacements, with no public access config
-   and no unrelated resource destruction.
-5. Follow the existing drain procedure before each worker/build replacement: halt placement,
+3. Set `OS_LOGIN_OPERATOR_ACCESS_CONFIRMED=true` in the ignored selected environment only after
+   that evidence exists. The default false value is intentional.
+4. Execute only the ordered stages `network`, `server`, `api`, `worker`, `build`. Before each one,
+   create a fresh mode-0600 checkpoint matching the schema enforced by
+   `scripts/assert-network-hardening-checkpoint.sh`. Record concrete evidence identifiers or
+   command-result locations, not bare assertions.
+
+   All checkpoints contain `schema_version`, `stage`, `gcp_project_id`, `gcp_region`, `gcp_zone`,
+   `prefix`, `source_git_head`, `operator_principal`, `observed_unix`, `expires_unix`, and exact
+   `checks`/`evidence` maps. Every check is `true`; every same-named evidence value is a non-empty
+   command result, log query, or inventory URI. `network` requires `control_plane_healthy`,
+   `iap_tunnel_access`, and `os_login_admin_access`. `server` and `api` require the two access
+   checks plus `nomad_quorum_healthy`, `api_load_balancer_healthy`, and `target_pool_healthy`.
+   `worker` requires the access checks plus `target_pool_drained`, `zero_target_allocations`,
+   `zero_target_workcells`, and `durable_sessions_preserved`. `build` replaces the final item with
+   `build_queue_quiesced`.
+5. Follow the existing drain procedure before the worker/build stages: halt placement,
    pause or snapshot workcells, prove durable upload, drain Nomad, and verify zero allocations.
    Roll server and API pools without losing quorum or load-balancer health.
-6. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
+6. Create, inspect, and apply one stage at a time (example for `server`):
+
+   ```bash
+   mise exec -- make -C iac/provider-gcp workload-cluster-plan \
+     WORKLOAD_CLUSTER_STAGE=server \
+     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-checkpoint.json
+   mise exec -- terraform -chdir=iac/provider-gcp \
+     show .tfplan.workload-cluster.server.dev
+   mise exec -- make -C iac/provider-gcp workload-cluster-apply \
+     WORKLOAD_CLUSTER_STAGE=server \
+     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-checkpoint.json \
+     CONFIRM='APPLY NETWORK HARDENING server'
+   ```
+
+   The reviewed plan must contain only the exact stage mutation plus the in-module guard and
+   one-step state marker. Never reuse a checkpoint or plan for another stage.
+7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
    Cloud NAT, and zero leaked workcells before proceeding.
-7. Only after every fleet node is on an OS-Login-enabled template should the legacy project
+8. Persist the successfully applied stage as `NETWORK_HARDENING_ROLLOUT_STAGE` in the ignored
+   selected environment. Only after every fleet node is on the `build` stage should the legacy project
    `ssh-keys` metadata be removed in a separate reviewed operation with a rollback principal
    already proven.
 

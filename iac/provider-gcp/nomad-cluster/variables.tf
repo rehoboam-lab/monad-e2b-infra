@@ -148,6 +148,28 @@ variable "monad_worker_autoscaler_shadow_enabled" {
   default     = false
 }
 
+variable "network_hardening_rollout_stage" {
+  type        = string
+  description = "Serial state-backed stage controlling network hardening and OS Login template adoption."
+
+  validation {
+    condition = contains([
+      "disabled",
+      "network",
+      "server",
+      "api",
+      "worker",
+      "build",
+    ], var.network_hardening_rollout_stage)
+    error_message = "network_hardening_rollout_stage must be disabled, network, server, api, worker, or build."
+  }
+}
+
+variable "os_login_operator_access_confirmed" {
+  type        = bool
+  description = "Whether the operator proved IAP tunnel and OS Login administrator access for this rollout."
+}
+
 variable "build_cluster_name" {
   type    = string
   default = "orch-build"

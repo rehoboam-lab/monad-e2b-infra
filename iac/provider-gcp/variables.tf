@@ -326,6 +326,24 @@ variable "os_login_operator_access_confirmed" {
   default     = false
 }
 
+variable "network_hardening_rollout_stage" {
+  type        = string
+  description = "State-backed, serial network/OS Login rollout stage. Only the guarded saved-plan workflow may advance this value."
+  default     = "disabled"
+
+  validation {
+    condition = contains([
+      "disabled",
+      "network",
+      "server",
+      "api",
+      "worker",
+      "build",
+    ], var.network_hardening_rollout_stage)
+    error_message = "network_hardening_rollout_stage must be disabled, network, server, api, worker, or build."
+  }
+}
+
 variable "orchestrator_node_pool" {
   type    = string
   default = "default"

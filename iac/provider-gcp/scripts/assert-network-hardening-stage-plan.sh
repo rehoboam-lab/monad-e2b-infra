@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+plan_path="${1:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE}"
+terraform_bin="${2:-terraform}"
+stage="${3:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE}"
+
+case "${stage}" in
+  network) previous='disabled' ;;
+  server) previous='network' ;;
+  api) previous='server' ;;
+  worker) previous='api' ;;
+  build) previous='worker' ;;
+  *)
+    printf 'Unknown network-hardening rollout stage: %s\n' "${stage}" >&2
+    exit 2
+    ;;
+esac
+
+plan_json="$("${terraform_bin}" show -json "${plan_path}")"
+jq -e '.errored != true' <<<"${plan_json}" >/dev/null || {
+  printf 'Refusing errored network-hardening plan.\n' >&2
+  exit 1
+}
+
+guard_address='module.cluster.terraform_data.os_login_operator_access_guard'
+marker_address='module.cluster.terraform_data.network_hardening_rollout_stage'
+
+guard_count="$(jq --arg address "${guard_address}" '[.resource_changes[]? | select(.address == $address)] | length' <<<"${plan_json}")"
+[[ "${guard_count}" -eq 1 ]] || {
+  printf 'OS Login authorization guard must be present exactly once in the targeted cluster graph.\n' >&2
+  exit 1
+}
+jq -e --arg address "${guard_address}" '
+  .resource_changes[]
+  | select(.address == $address)
+  | .change.after.input == true
+    and (
+      .change.actions == ["create"]
+      or .change.actions == ["no-op"]
+      or .change.actions == ["update"]
+    )
+' <<<"${plan_json}" >/dev/null || {
+  printf 'OS Login authorization guard is not explicitly open in the reviewed plan.\n' >&2
+  exit 1
+}
+
+marker_count="$(jq --arg address "${marker_address}" '[.resource_changes[]? | select(.address == $address)] | length' <<<"${plan_json}")"
+[[ "${marker_count}" -eq 1 ]] || {
+  printf 'Network-hardening state marker must be present exactly once.\n' >&2
+  exit 1
+}
+jq -e \
+  --arg address "${marker_address}" \
+  --arg stage "${stage}" \
+  --arg previous "${previous}" '
+    .resource_changes[]
+    | select(.address == $address)
+    | .change.after.input == $stage
+    and (
+      if $stage == "network"
+      then (.change.before == null or .change.before.input == $previous)
+      else .change.before.input == $previous
+      end
+    )
+    and (
+      .change.actions == ["create"]
+      or .change.actions == ["update"]
+    )
+  ' <<<"${plan_json}" >/dev/null || {
+  printf 'Network-hardening stage must advance exactly %s -> %s in Terraform state.\n' \
+    "${previous}" "${stage}" >&2
+  exit 1
+}
+
+case "${stage}" in
+  network)
+    expected_mutations='[
+      "module.cluster.module.network.google_compute_firewall.internal_remote_connection_firewall_ingress",
+      "module.cluster.module.network.google_compute_firewall.remote_connection_firewall_ingress"
+    ]'
+    ;;
+  server)
+    expected_mutations='[
+      "module.cluster.google_compute_instance_template.server",
+      "module.cluster.google_compute_region_instance_group_manager.server_pool"
+    ]'
+    ;;
+  api)
+    expected_mutations='[
+      "module.cluster.google_compute_instance_group_manager.api_pool",
+      "module.cluster.google_compute_instance_template.api"
+    ]'
+    ;;
+  worker)
+    expected_mutations='[
+      "module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template",
+      "module.cluster.module.client_cluster[\"default\"].google_compute_region_instance_group_manager.pool"
+    ]'
+    ;;
+  build)
+    expected_mutations='[
+      "module.cluster.google_compute_instance_group_manager.clickhouse_pool",
+      "module.cluster.google_compute_instance_group_manager.loki_pool",
+      "module.cluster.google_compute_instance_template.clickhouse",
+      "module.cluster.google_compute_instance_template.loki",
+      "module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template",
+      "module.cluster.module.build_cluster[\"default\"].google_compute_region_instance_group_manager.pool"
+    ]'
+    ;;
+esac
+
+actual_mutations="$(jq -cS \
+  --arg guard "${guard_address}" \
+  --arg marker "${marker_address}" '
+    [
+      .resource_changes[]?
+      | select(.mode == "managed")
+      | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+      | select(.address != $guard and .address != $marker)
+      | .address
+    ]
+    | sort
+  ' <<<"${plan_json}")"
+expected_mutations="$(jq -cS 'sort' <<<"${expected_mutations}")"
+if [[ "${actual_mutations}" != "${expected_mutations}" ]]; then
+  printf 'Refusing %s stage: mutation set differs from its exact reviewed pool boundary.\n' \
+    "${stage}" >&2
+  printf 'Expected: %s\nActual:   %s\n' "${expected_mutations}" "${actual_mutations}" >&2
+  exit 1
+fi
+
+# Enforce cumulative OS Login intent across every managed template. This also
+# proves that a stage cannot accidentally roll a later pool.
+template_expectations="$(jq -cn --arg stage "${stage}" '
+  {network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
+  | ($rank[$stage]) as $current
+  | [
+      {address:"module.cluster.google_compute_instance_template.server", enabled:($current >= 2)},
+      {address:"module.cluster.google_compute_instance_template.api", enabled:($current >= 3)},
+      {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template", enabled:($current >= 4)},
+      {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template", enabled:($current >= 5)},
+      {address:"module.cluster.google_compute_instance_template.loki", enabled:($current >= 5)},
+      {address:"module.cluster.google_compute_instance_template.clickhouse", enabled:($current >= 5)}
+    ]
+')"
+jq -e --argjson expected "${template_expectations}" '
+  [
+    $expected[] as $want
+    | [ .resource_changes[]? | select(.address == $want.address) ] as $matches
+    | ($matches | length) == 1
+      and (
+        if $want.enabled
+        then $matches[0].change.after.metadata["enable-oslogin"] == "TRUE"
+        else ($matches[0].change.after.metadata | has("enable-oslogin") | not)
+        end
+      )
+  ]
+  | all
+' <<<"${plan_json}" >/dev/null || {
+  printf 'Refusing %s stage: cumulative OS Login template intent is incomplete.\n' \
+    "${stage}" >&2
+  exit 1
+}
+
+printf 'Network-hardening stage plan passed: %s (%s -> %s).\n' \
+  "${stage}" "${previous}" "${stage}"

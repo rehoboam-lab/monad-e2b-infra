@@ -119,9 +119,9 @@ resource "google_compute_instance_template" "api" {
     { api_cluster = "TRUE" },
     {
       enable-osconfig         = "TRUE",
-      enable-oslogin          = "TRUE",
       enable-guest-attributes = "TRUE",
     },
+    local.os_login_enabled.api ? { enable-oslogin = "TRUE" } : {},
   )
 
   scheduling {
@@ -165,6 +165,8 @@ resource "google_compute_instance_template" "api" {
   }
 
   depends_on = [
+    terraform_data.os_login_operator_access_guard,
+    terraform_data.network_hardening_rollout_stage,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]

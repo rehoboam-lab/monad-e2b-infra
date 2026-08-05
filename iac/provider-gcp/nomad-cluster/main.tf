@@ -30,6 +30,58 @@ locals {
     "scripts/run-consul.sh"           = substr(filesha256("${path.module}/scripts/run-consul.sh"), 0, 5)
     "scripts/run-nomad.sh"            = substr(filesha256("${path.module}/scripts/run-nomad.sh"), 0, 5)
   }
+
+  network_hardening_stage_order = {
+    disabled = 0
+    network  = 1
+    server   = 2
+    api      = 3
+    worker   = 4
+    build    = 5
+  }
+  network_hardening_stage_number = local.network_hardening_stage_order[var.network_hardening_rollout_stage]
+  os_login_enabled = {
+    server     = local.network_hardening_stage_number >= local.network_hardening_stage_order.server
+    api        = local.network_hardening_stage_number >= local.network_hardening_stage_order.api
+    client     = local.network_hardening_stage_number >= local.network_hardening_stage_order.worker
+    build      = local.network_hardening_stage_number >= local.network_hardening_stage_order.build
+    loki       = local.network_hardening_stage_number >= local.network_hardening_stage_order.build
+    clickhouse = local.network_hardening_stage_number >= local.network_hardening_stage_order.build
+  }
+}
+
+# Keep the authorization guard in module.cluster: the normal saved cluster plan
+# targets that module, and every replacement path below also depends on it.
+resource "terraform_data" "os_login_operator_access_guard" {
+  input = var.os_login_operator_access_confirmed
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.network_hardening_rollout_stage == "disabled"
+        || var.os_login_operator_access_confirmed
+      )
+      error_message = "OS Login rollout is gated: grant and prove roles/iap.tunnelResourceAccessor plus roles/compute.osAdminLogin for the operator principal, then explicitly confirm access through the guarded staged workflow."
+    }
+  }
+}
+
+# The saved-plan assertion verifies an exact one-step transition in this state
+# marker, preventing an operator from skipping or reordering fleet stages.
+resource "terraform_data" "network_hardening_rollout_stage" {
+  input = var.network_hardening_rollout_stage
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.network_hardening_rollout_stage == "disabled"
+        || var.os_login_operator_access_confirmed
+      )
+      error_message = "Network hardening stages require proven IAP and OS Login operator access."
+    }
+  }
+
+  depends_on = [terraform_data.os_login_operator_access_guard]
 }
 
 resource "google_secret_manager_secret" "consul_gossip_encryption_key" {
@@ -134,6 +186,11 @@ module "network" {
 
   labels = var.labels
   prefix = var.prefix
+
+  # Consume guard outputs in the two administrative firewall resources. The
+  # network child is a legacy provider module and cannot accept depends_on.
+  os_login_operator_access_confirmed = terraform_data.os_login_operator_access_guard.output
+  network_hardening_rollout_stage    = terraform_data.network_hardening_rollout_stage.output
 }
 
 module "filestore" {
@@ -202,8 +259,11 @@ module "build_cluster" {
   file_hash = local.file_hash
 
   set_orchestrator_version_metadata = false
+  enable_os_login                   = local.os_login_enabled.build
 
   depends_on = [
+    terraform_data.os_login_operator_access_guard,
+    terraform_data.network_hardening_rollout_stage,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
@@ -227,6 +287,7 @@ module "client_cluster" {
   autoscaler       = each.value.autoscaler
 
   workload_autoscaler_shadow_enabled = each.key == "default" && var.monad_worker_autoscaler_shadow_enabled
+  enable_os_login                    = local.os_login_enabled.client
 
   // This is here for backwards compatibility
   cluster_name              = each.key == "default" ? "${var.prefix}${var.client_cluster_name}" : "${var.prefix}${var.client_cluster_name}-${each.key}"
@@ -270,6 +331,8 @@ module "client_cluster" {
   set_orchestrator_version_metadata = var.environment != "dev"
 
   depends_on = [
+    terraform_data.os_login_operator_access_guard,
+    terraform_data.network_hardening_rollout_stage,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
