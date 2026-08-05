@@ -165,6 +165,21 @@ variable "network_hardening_rollout_stage" {
   }
 }
 
+variable "network_hardening_rollout_wait_seconds" {
+  type        = number
+  description = "Bounded maximum time for the in-apply stage convergence sentinel."
+  default     = 1800
+
+  validation {
+    condition = (
+      floor(var.network_hardening_rollout_wait_seconds) == var.network_hardening_rollout_wait_seconds
+      && var.network_hardening_rollout_wait_seconds >= 60
+      && var.network_hardening_rollout_wait_seconds <= 3600
+    )
+    error_message = "network_hardening_rollout_wait_seconds must be an integer between 60 and 3600."
+  }
+}
+
 variable "os_login_operator_access_confirmed" {
   type        = bool
   description = "Whether the operator proved IAP tunnel and OS Login administrator access for this rollout."

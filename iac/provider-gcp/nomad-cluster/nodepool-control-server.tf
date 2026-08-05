@@ -163,7 +163,6 @@ resource "google_compute_instance_template" "server" {
 
   depends_on = [
     terraform_data.os_login_operator_access_guard,
-    terraform_data.network_hardening_rollout_stage,
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
   ]

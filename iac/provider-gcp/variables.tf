@@ -344,6 +344,21 @@ variable "network_hardening_rollout_stage" {
   }
 }
 
+variable "network_hardening_rollout_wait_seconds" {
+  type        = number
+  description = "Bounded maximum time for a staged network-hardening MIG replacement to converge."
+  default     = 1800
+
+  validation {
+    condition = (
+      floor(var.network_hardening_rollout_wait_seconds) == var.network_hardening_rollout_wait_seconds
+      && var.network_hardening_rollout_wait_seconds >= 60
+      && var.network_hardening_rollout_wait_seconds <= 3600
+    )
+    error_message = "network_hardening_rollout_wait_seconds must be an integer between 60 and 3600."
+  }
+}
+
 variable "orchestrator_node_pool" {
   type    = string
   default = "default"

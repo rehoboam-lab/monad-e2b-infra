@@ -42,9 +42,11 @@ SSH-key value.
   `module.cluster`; every template path and both administrative firewalls consume that in-graph
   guard. A direct or normal `-target=module.cluster` plan therefore cannot omit it.
 - The rollout marker permits exactly `disabled -> network -> server -> api -> worker -> build`.
-  The stage-plan assertion requires the exact firewall or pool mutation set, rejects all other
-  drift, and retains the existing topology, quota, worker-MIG, and generic-autoscaler ownership
-  checks.
+  A stage-specific convergence sentinel waits for the administrative firewalls and affected MIGs
+  to report both `status.isStable` and `status.versionTarget.isReached` before that marker advances.
+  The stage-plan assertion permits only the stage's exact firewall or pool boundary (including a
+  subset left by a partial apply), rejects all other drift, and retains the existing topology,
+  quota, worker-MIG, and generic-autoscaler ownership checks.
 - Every stage requires a mode-0600, non-symlink checkpoint bound to the exact project, region,
   zone, prefix, Git head, named operator, and a maximum one-hour validity window. Its checks and
   evidence are stage-specific. The complete checkpoint and digest are embedded in the saved-plan
@@ -65,8 +67,8 @@ The local branch passed the following checks before handoff:
 - `network-security-check`, including a real targeted child-module plan that proves the in-graph
   OS Login guard blocks a replacement when confirmation is false.
 - Serial rollout fixtures for every allowed transition, exact mutation boundaries, fresh
-  checkpoints, skipped-stage rejection, closed-guard rejection, and protection of generic
-  autoscaler ownership.
+  checkpoints, asynchronous MIG convergence, partial-stage retry, reverse-stage rejection,
+  skipped-stage rejection, closed-guard rejection, and protection of generic-autoscaler ownership.
 - The complete Linux `packages/orchestrator/pkg/sandbox/network` suite in a privileged container,
   including real network-namespace, iptables, and nftables tests.
 - The complete Linux `packages/orchestrator/pkg/tcpfirewall` suite with its Docker-backed listener
@@ -116,7 +118,25 @@ Do not apply this branch merely because validation is green.
    ```
 
    The reviewed plan must contain only the exact stage mutation plus the in-module guard and
-   one-step state marker. Never reuse a checkpoint or plan for another stage.
+   convergence/state sentinels. The shared rollout lease remains held until the affected MIG is
+   stable and has reached its target version. Never reuse a checkpoint or plan for another stage.
+   If apply or convergence fails, the persisted marker remains at the prior stage: correct the
+   in-boundary cause. Once Terraform apply has started, any timeout, interruption, or unverifiable
+   post-apply result preserves the generation-bound shared lease and its private recovery directory.
+   Prove the original process is no longer running, create a fresh checkpoint for the same stage,
+   then run:
+
+   ```bash
+   make workload-cluster-recover-lease WORKLOAD_CLUSTER_STAGE=<stage> \
+     WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
+     WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token> \
+     CONFIRM='RELEASE NETWORK HARDENING LEASE <stage>'
+   ```
+
+   The recovery command re-proves live
+   firewall/MIG convergence before releasing that exact lease. Then create a fresh reviewed plan
+   and retry the same stage. Reverse-stage plans remain fail-closed; do not bypass the workflow for
+   an ad hoc rollback.
 7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
    Cloud NAT, and zero leaked workcells before proceeding.

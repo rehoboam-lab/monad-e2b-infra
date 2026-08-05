@@ -85,14 +85,18 @@ for role in server api loki clickhouse; do
     exit 1
   }
   grep -F 'terraform_data.os_login_operator_access_guard' "${template_file}" >/dev/null
-  grep -F 'terraform_data.network_hardening_rollout_stage' "${template_file}" >/dev/null
 done
 grep -F 'var.enable_os_login ? { enable-oslogin = "TRUE" } : {}' \
   "${provider_root}/nomad-cluster/worker-cluster/nodepool.tf" >/dev/null
 test "$(grep -Fc 'terraform_data.os_login_operator_access_guard' \
   "${provider_root}/nomad-cluster/main.tf")" -ge 4
-test "$(grep -Fc 'terraform_data.network_hardening_rollout_stage' \
-  "${provider_root}/nomad-cluster/main.tf")" -ge 3
+grep -F 'depends_on = [terraform_data.network_hardening_rollout_completion]' \
+  "${provider_root}/nomad-cluster/main.tf" >/dev/null
+if grep -R -n 'terraform_data\.network_hardening_rollout_stage' \
+  "${provider_root}/nomad-cluster" >/dev/null; then
+  printf 'The persisted stage marker cannot remain upstream of fleet replacements.\n' >&2
+  exit 1
+fi
 grep -F 'var.os_login_operator_access_confirmed' "${network_tf}" >/dev/null
 grep -F 'var.network_hardening_rollout_stage != "disabled"' "${network_tf}" >/dev/null
 
@@ -140,14 +144,11 @@ mkdir "${test_dir}/cluster"
     "${provider_root}/nomad-cluster/variables.tf"
   extract_resource terraform_data os_login_operator_access_guard \
     "${provider_root}/nomad-cluster/main.tf"
-  extract_resource terraform_data network_hardening_rollout_stage \
-    "${provider_root}/nomad-cluster/main.tf"
   printf '%s\n' \
     'resource "terraform_data" "targeted_replacement" {' \
     '  input = var.network_hardening_rollout_stage' \
     '  depends_on = [' \
     '    terraform_data.os_login_operator_access_guard,' \
-    '    terraform_data.network_hardening_rollout_stage,' \
     '  ]' \
     '}'
 } >"${test_dir}/cluster/main.tf"

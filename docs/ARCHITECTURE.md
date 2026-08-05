@@ -425,11 +425,15 @@ flowchart TB
   (`35.235.240.0/20`) and all allow/deny decisions are logged without packet metadata. Every fleet
   instance template enables OS Login after its serial rollout stage. The authorization guard lives
   inside `module.cluster` and every replacement path depends on it, so a targeted saved plan cannot
-  omit it. A state-backed marker and exact mutation allowlist serialize adoption as
+  omit it. A convergence sentinel and state-backed marker serialize adoption as
   `network -> server -> api -> worker -> build`; each stage requires a fresh, private operator
   checkpoint for IAP/OS Login plus the role-specific health or drain evidence. The checkpoint bytes
-  are bound into saved-plan provenance and revalidated before apply. This prevents both operator
-  lockout and concurrent PROACTIVE replacement of every pool. The public load balancer is the only
+  are bound into saved-plan provenance and revalidated before apply. The marker remains at the prior
+  stage until the affected MIG is stable and has reached its target version, and the shared rollout
+  lease remains held through that proof. If apply starts but that proof is interrupted or times
+  out, the generation-bound lease and recovery token remain held until an explicit recovery command
+  re-proves convergence. This prevents both operator lockout and concurrent
+  PROACTIVE replacement of every pool. The public load balancer is the only
   application ingress path. See
   [`MONAD_GCP_NETWORK_HARDENING.md`](MONAD_GCP_NETWORK_HARDENING.md) for the live audit and rollout
   procedure.
