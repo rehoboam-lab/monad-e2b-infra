@@ -28,7 +28,9 @@ SSH-key value.
   `169.254.169.254`, RFC1918, CGNAT, loopback, and IPv6 local ranges all fall within the
   Firecracker slot's existing predefined nftables deny set.
 - The GCP environment does not set `ALLOW_SANDBOX_INTERNAL_CIDRS`; its effective value is the empty
-  default. This branch makes any non-empty GCP value a Terraform validation error.
+  default. This branch makes any non-empty GCP value a Terraform validation error and prevents the
+  generic orchestrator environment map from overriding either that value or the fixed
+  `SANDBOX_ORCHESTRATOR_IP=192.0.2.1` host-proxy address.
 
 ## Source invariants
 
@@ -50,7 +52,10 @@ SSH-key value.
   `disabled`, while still rejecting any non-dev stage advancement or regression.
 - The rollout marker permits exactly `disabled -> network -> server -> api -> worker -> build`.
   A stage-specific convergence sentinel waits for the administrative firewalls and affected MIGs
-  to report both `status.isStable` and `status.versionTarget.isReached` before that marker advances.
+  to report both `status.isStable` and `status.versionTarget.isReached`, inventories their exact
+  instance IDs and target templates, proves IAP/OS Login against each ID, and binds the replacement
+  names to healthy Nomad quorum/client state before that marker advances. Server/API stages also
+  require healthy load-balancer membership for that same inventory.
   The stage-plan assertion permits only the stage's exact firewall or pool boundary (including a
   subset left by a partial apply), rejects all other drift, and retains the existing topology,
   quota, worker-MIG, and generic-autoscaler ownership checks.
@@ -130,12 +135,15 @@ Do not apply this branch merely because validation is green.
    convergence/state sentinels. The cluster plan forces replacement of the convergence sentinel on
    every attempt, including a marker-only retry, so the apply graph re-proves the live fleet before
    the state marker can advance. The shared rollout lease remains held until the affected MIG is
-   stable and has reached its target version. Never reuse a checkpoint or plan for another stage.
+   stable, has reached its target version, and its identity-bound post-replacement access and service
+   evidence passes. Never reuse a checkpoint or plan for another stage.
    If apply or convergence fails, the persisted marker remains at the prior stage: correct the
    in-boundary cause. If apply advances the marker but the post-apply plan finds same-stage drift,
    the bounded retry accepts only a no-op current-stage marker while the forced sentinel replacement
-   re-proves convergence. If an interrupted replacement leaves that current-stage sentinel absent,
-   only the same stage may recreate it; the next stage remains blocked. Once Terraform apply has
+   re-proves convergence. If an interrupted initial transition or forced retry leaves the sentinel
+   absent, only a plan carrying the validated, generation-bound recovery token for that exact stage
+   may recreate it; ordinary, mismatched-stage, skipped-stage, and next-stage plans remain blocked.
+   Once Terraform apply has
    started, any timeout, interruption, or unverifiable post-apply result preserves the
    generation-bound shared lease and its private recovery directory.
    Prove the original process is no longer running, create a fresh checkpoint for the same stage,
@@ -149,8 +157,9 @@ Do not apply this branch merely because validation is green.
      CONFIRM='RELEASE NETWORK HARDENING LEASE <stage>'
    ```
 
-   The recovery command re-proves live firewall/MIG convergence and requires a clean scoped
-   Terraform post-plan before releasing that exact lease. If Terraform still has same-stage drift,
+   The recovery command re-proves live firewall/MIG convergence, exact replacement identity,
+   post-replacement IAP/OS Login and stage-specific Nomad/load-balancer health, then requires a clean
+   scoped Terraform post-plan before releasing that exact lease. If Terraform still has same-stage drift,
    it leaves the lease held. Use the same token to create and review the bounded retry plan, then
    apply it under the still-held lease:
 
@@ -173,9 +182,10 @@ Do not apply this branch merely because validation is green.
    another environment cannot recover or release this state. Stale, replaced, or wrong-scope token
    copies fail before mutation. Reverse-stage plans remain fail-closed; do not bypass the workflow
    for an ad hoc rollback.
-7. After every replacement, prove IAP/OS Login access, service health, attached-service-account ADC,
+7. The sentinel enforces replacement-identity-bound IAP/OS Login and role-specific service health.
+   Before proceeding, separately retain the broader canary evidence for attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
-   Cloud NAT, and zero leaked workcells before proceeding.
+   Cloud NAT, and zero leaked workcells.
 8. Persist the successfully applied stage as `NETWORK_HARDENING_ROLLOUT_STAGE` in the ignored
    selected environment. Only after every fleet node is on the `build` stage should the legacy project
    `ssh-keys` metadata be removed in a separate reviewed operation with a rollback principal

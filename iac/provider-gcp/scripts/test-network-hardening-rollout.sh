@@ -33,6 +33,8 @@ grep -F 'resource "terraform_data" "network_hardening_rollout_completion"' \
   "${cluster_source}" >/dev/null
 grep -F 'command = "\"${abspath("${path.module}/../scripts/wait-network-hardening-stage.sh")}\""' \
   "${cluster_source}" >/dev/null
+grep -F 'DOMAIN_NAME                     = var.domain_name' \
+  "${cluster_source}" >/dev/null
 grep -F 'depends_on = [terraform_data.network_hardening_rollout_completion]' \
   "${cluster_source}" >/dev/null
 if grep -R -n 'terraform_data\.network_hardening_rollout_stage' \
@@ -72,6 +74,7 @@ release_line="$(grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' "${apply_block}" 
 ((lease_assert_line < apply_line && apply_line < wait_line && wait_line < release_line))
 grep -F 'mutation_started=true' "${apply_block}" >/dev/null
 grep -F 'convergence_proven=true' "${apply_block}" >/dev/null
+grep -F 'DOMAIN_NAME="$(DOMAIN_NAME)"' "${apply_block}" >/dev/null
 grep -F 'preserving the shared lease and private recovery directory' \
   "${apply_block}" >/dev/null
 
@@ -243,7 +246,38 @@ jq '
     | .change.actions) = ["no-op"]
 ' "${test_dir}/server.plan" >"${test_dir}/missing-sentinel-retry.plan"
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
-  "${test_dir}/missing-sentinel-retry.plan" "${fake_terraform}" server >/dev/null
+  "${test_dir}/missing-sentinel-retry.plan" "${fake_terraform}" server server >/dev/null
+expect_fail "absent current-stage sentinel requires validated recovery context" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-sentinel-retry.plan" "${fake_terraform}" server
+
+# An initial stage transition can likewise be interrupted after Terraform
+# destroys the previous sentinel but before either its replacement or the
+# downstream marker is persisted. Only the exact previous -> requested marker
+# transition may recreate that absent sentinel.
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.actions) = ["create"]
+  | (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion")
+    | .change.before) = null
+' "${test_dir}/server.plan" >"${test_dir}/missing-initial-sentinel-retry.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-initial-sentinel-retry.plan" "${fake_terraform}" server server >/dev/null
+expect_fail "absent initial-stage sentinel requires validated recovery context" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-initial-sentinel-retry.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage")
+    | .change.before.input) = "disabled"
+' "${test_dir}/missing-initial-sentinel-retry.plan" \
+  >"${test_dir}/missing-initial-sentinel-skipped-marker.plan"
+expect_fail "absent sentinel cannot weaken the exact previous-stage marker" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-initial-sentinel-skipped-marker.plan" "${fake_terraform}" server server
 
 jq '
   (.resource_changes[]

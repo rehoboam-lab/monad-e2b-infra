@@ -145,7 +145,8 @@ mise exec -- make -C iac/provider-gcp workload-cluster-wait
 in-graph convergence sentinel to be replaced on every reviewed attempt, but the target no longer
 authorizes the whole module to mutate at once. The OS Login authorization guard is inside that
 module and is an explicit dependency of every replacement path. A Terraform-state marker must
-advance exactly one step only after the sentinel has re-proved live convergence. A second assertion
+advance exactly one step only after the sentinel has re-proved live convergence, exact replacement
+identity, IAP/OS Login access, and stage-specific Nomad/load-balancer health. A second assertion
 permits only the two firewall updates for `network`,
 or one PROACTIVE pool's template/MIG pair for `server`, `api`, `worker`, or `build` (the zero-sized
 Loki/ClickHouse templates are adopted with `build`). Any concurrent pool, generic autoscaler,
@@ -161,6 +162,9 @@ lease checks of the complete release. It does not revive the legacy `plan-withou
 If a successful apply advances the marker but its post-apply plan detects same-stage drift, a
 generation-bound borrowed-token retry accepts the current marker only as a no-op and forcibly
 replaces the convergence sentinel before applying any remaining in-boundary mutation.
+If an interruption destroys that sentinel before the marker advances, only the validated recovery
+token for the exact same stage admits its recreation; an ordinary or next-stage plan cannot use the
+missing state object to bypass serial ordering.
 
 The cluster plan and apply derive quota admission from the same reviewed saved
 plan. If every positive-capacity MIG already has the exact reviewed base size

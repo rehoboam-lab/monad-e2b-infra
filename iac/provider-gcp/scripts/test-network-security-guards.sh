@@ -112,6 +112,16 @@ fi
 
 grep -F 'trimspace(var.allow_sandbox_internal_cidrs) == ""' "${provider_root}/variables.tf" >/dev/null
 grep -F 'ALLOW_SANDBOX_INTERNAL_CIDRS is forbidden on GCP' "${provider_root}/variables.tf" >/dev/null
+orchestrator_env_variable="$(extract_variable orchestrator_env_vars "${provider_root}/variables.tf")"
+grep -F '"ALLOW_SANDBOX_INTERNAL_CIDRS"' <<<"${orchestrator_env_variable}" >/dev/null
+grep -F '"SANDBOX_ORCHESTRATOR_IP"' <<<"${orchestrator_env_variable}" >/dev/null
+grep -F 'orchestrator_env_vars cannot override' <<<"${orchestrator_env_variable}" >/dev/null
+grep -F 'local.orchestrator_default_env_vars,' "${provider_root}/main.tf" >/dev/null
+grep -F 'var.orchestrator_env_vars,' "${provider_root}/main.tf" >/dev/null
+grep -F 'ALLOW_SANDBOX_INTERNAL_CIDRS = var.allow_sandbox_internal_cidrs' \
+  "${provider_root}/main.tf" >/dev/null
+grep -F 'SANDBOX_ORCHESTRATOR_IP      = "192.0.2.1"' \
+  "${provider_root}/main.tf" >/dev/null
 os_login_variable="$(extract_variable os_login_operator_access_confirmed "${provider_root}/variables.tf")"
 stage_variable="$(extract_variable network_hardening_rollout_stage "${provider_root}/variables.tf")"
 grep -F 'default     = false' <<<"${os_login_variable}" >/dev/null
@@ -201,6 +211,37 @@ grep -F 'OS Login rollout is restricted to the dev invited-beta fleet' \
   -target=module.cluster.terraform_data.targeted_replacement \
   -var='network_hardening_rollout_stage=server' \
   -var='os_login_operator_access_confirmed=true' >/dev/null
+
+mkdir "${test_dir}/reserved-env"
+{
+  printf '%s\n' \
+    'terraform {' \
+    '  required_version = ">= 1.7.0"' \
+    '}'
+  printf '%s\n' "${orchestrator_env_variable}"
+  printf '%s\n' \
+    'output "orchestrator_env_vars" {' \
+    '  value     = var.orchestrator_env_vars' \
+    '  sensitive = true' \
+    '}'
+} >"${test_dir}/reserved-env/main.tf"
+"${terraform_bin}" -chdir="${test_dir}/reserved-env" init \
+  -backend=false -input=false -no-color >/dev/null
+"${terraform_bin}" -chdir="${test_dir}/reserved-env" plan \
+  -input=false -lock=false -no-color \
+  -var='orchestrator_env_vars={SAFE_OVERRIDE="fixture"}' >/dev/null
+for reserved_key in ALLOW_SANDBOX_INTERNAL_CIDRS SANDBOX_ORCHESTRATOR_IP; do
+  if "${terraform_bin}" -chdir="${test_dir}/reserved-env" plan \
+    -input=false -lock=false -no-color \
+    -var="orchestrator_env_vars={${reserved_key}=\"fixture\"}" \
+    >"${test_dir}/reserved-env-${reserved_key}.log" 2>&1; then
+    printf 'Reserved orchestrator isolation key escaped variable validation: %s\n' \
+      "${reserved_key}" >&2
+    exit 1
+  fi
+  grep -F 'orchestrator_env_vars cannot override' \
+    "${test_dir}/reserved-env-${reserved_key}.log" >/dev/null
+done
 
 shared_firewall="${repo_root}/packages/shared/pkg/sandbox-network/firewall.go"
 slot_firewall="${repo_root}/packages/orchestrator/pkg/sandbox/network/firewall.go"

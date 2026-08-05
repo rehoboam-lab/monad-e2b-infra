@@ -431,9 +431,13 @@ flowchart TB
   `network -> server -> api -> worker -> build`; each stage requires a fresh, private operator
   checkpoint for IAP/OS Login plus the role-specific health or drain evidence. The checkpoint bytes
   are bound into saved-plan provenance; their expiry and full schema are revalidated under the held
-  rollout lease immediately before mutation. The marker remains at the prior stage until the
-  affected MIG is stable and has reached its target version, and the shared rollout lease remains
-  held through that proof. If apply starts but that proof is interrupted or times
+  rollout lease immediately before mutation. After replacement, the convergence sentinel inventories
+  the exact instance IDs and target templates, proves IAP plus OS Login by checking each instance's
+  metadata identity over the tunnel, and requires the replacement names to appear in healthy Nomad
+  quorum/client state. Server and API stages additionally bind healthy load-balancer backends to that
+  same inventory. The marker remains at the prior stage until those checks and MIG target-version
+  convergence pass, and the shared rollout lease remains held through that proof. If apply starts but
+  that proof is interrupted or times
   out, the generation-bound lease and recovery token remain held until an explicit recovery command
   re-proves convergence and a clean Terraform post-plan, or a fresh reviewed same-stage retry runs
   under the borrowed token. Ordinary full workload plans in `dev` require the convergence sentinel
@@ -450,9 +454,10 @@ flowchart TB
   masquerading. Its predefined deny set blocks metadata/link-local (`169.254.0.0/16`), loopback,
   RFC1918, CGNAT, and IPv6 local ranges, which covers the workload VPC, Nomad, Consul, Cloud SQL,
   and other private control endpoints. The predefined deny precedes tenant allow rules. GCP
-  rejects the former `ALLOW_SANDBOX_INTERNAL_CIDRS` escape hatch, while the synthetic
-  orchestrator-in-sandbox address remains an explicit exception for the hyperloop, portmapper,
-  and NFS proxy redirects. Public destinations, including authenticated public TAMS broker/proxy
+  rejects the former `ALLOW_SANDBOX_INTERNAL_CIDRS` escape hatch and reserves both that key and
+  `SANDBOX_ORCHESTRATOR_IP` against generic environment overrides. The fixed documentation-range
+  orchestrator-in-sandbox address remains an explicit exception for the hyperloop, portmapper, and
+  NFS proxy redirects. Public destinations, including authenticated public TAMS broker/proxy
   routes, continue through host NAT and logged Cloud NAT. Because the nftables rules match only
   the guest tap, host metadata-server access for attached-service-account ADC remains available.
 - The guarded **dev invited-beta topology** gives server and worker regional MIGs zero surge

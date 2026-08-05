@@ -229,8 +229,18 @@ workload-cluster-plan-check:
 			"$(WORKLOAD_CLUSTER_PLAN)" "$(TF)" \
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${artifacts}" cluster; \
+		recovery_stage=""; \
+		if [ -n "$(WORKLOAD_CLUSTER_RECOVERY_TOKEN)" ]; then \
+			./scripts/assert-network-hardening-recovery-token.sh \
+				"$(WORKLOAD_CLUSTER_RECOVERY_TOKEN)" "$(TERRAFORM_STATE_BUCKET)" \
+				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+				"$(WORKLOAD_CLUSTER_STAGE)" "$(ENV)" \
+				"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
+			recovery_stage="$(WORKLOAD_CLUSTER_STAGE)"; \
+		fi; \
 		./scripts/assert-network-hardening-stage-plan.sh \
-			"$(WORKLOAD_CLUSTER_PLAN)" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)"
+			"$(WORKLOAD_CLUSTER_PLAN)" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
+			"$${recovery_stage}"
 
 workload-plan-assertions-test:
 	@ ./scripts/test-network-hardening-rollout.sh
@@ -351,6 +361,7 @@ workload-cluster-plan:
 		lease_acquired=false; \
 		lease_borrowed=false; \
 		recovery_token="$(WORKLOAD_CLUSTER_RECOVERY_TOKEN)"; \
+		recovery_stage=""; \
 		cleanup() { \
 			status=$$?; \
 			trap - EXIT HUP INT TERM; \
@@ -383,6 +394,7 @@ workload-cluster-plan:
 				"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
+			recovery_stage="$(WORKLOAD_CLUSTER_STAGE)"; \
 		else \
 			"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
 				"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
@@ -427,7 +439,8 @@ workload-cluster-plan:
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${after_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
-			"$${temp_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)"; \
+			"$${temp_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
+			"$${recovery_stage}"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${temp_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \
@@ -468,6 +481,7 @@ workload-cluster-apply:
 		lease_acquired=false; \
 		lease_borrowed=false; \
 		recovery_token="$(WORKLOAD_CLUSTER_RECOVERY_TOKEN)"; \
+		recovery_stage=""; \
 		mutation_started=false; \
 		convergence_proven=false; \
 		plan_moved=false; \
@@ -535,6 +549,7 @@ workload-cluster-apply:
 				"$(TERRAFORM_STATE_PREFIX)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
+			recovery_stage="$(WORKLOAD_CLUSTER_STAGE)"; \
 		else \
 			"$(WORKLOAD_ROLLOUT_LEASE)" acquire \
 				"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
@@ -570,7 +585,8 @@ workload-cluster-apply:
 			"$(WORKLOAD_TOPOLOGY_POLICY)" "$(WORKLOAD_PACKER_TEMPLATE)" \
 			"$${before_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
-			"$${apply_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)"; \
+			"$${apply_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
+			"$${recovery_stage}"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${apply_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \
@@ -597,6 +613,7 @@ workload-cluster-apply:
 		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 			GCP_REGION="$(GCP_REGION)" \
 			GCP_ZONE="$(GCP_ZONE)" \
+			DOMAIN_NAME="$(DOMAIN_NAME)" \
 			PREFIX="$(PREFIX)" \
 			NETWORK_HARDENING_ROLLOUT_STAGE="$(WORKLOAD_CLUSTER_STAGE)" \
 			NETWORK_HARDENING_WAIT_SECONDS="$(NETWORK_HARDENING_ROLLOUT_WAIT_SECONDS)" \
@@ -661,6 +678,7 @@ workload-cluster-recover-lease:
 		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 			GCP_REGION="$(GCP_REGION)" \
 			GCP_ZONE="$(GCP_ZONE)" \
+			DOMAIN_NAME="$(DOMAIN_NAME)" \
 			PREFIX="$(PREFIX)" \
 			NETWORK_HARDENING_ROLLOUT_STAGE="$(WORKLOAD_CLUSTER_STAGE)" \
 			NETWORK_HARDENING_WAIT_SECONDS="$(NETWORK_HARDENING_ROLLOUT_WAIT_SECONDS)" \

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plan_path="${1:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE}"
+plan_path="${1:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE]}"
 terraform_bin="${2:-terraform}"
-stage="${3:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE}"
+stage="${3:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE]}"
+recovery_stage="${4:-}"
 
 case "${stage}" in
   network) previous='disabled' ;;
@@ -16,6 +17,12 @@ case "${stage}" in
     exit 2
     ;;
 esac
+
+if [[ -n "${recovery_stage}" && "${recovery_stage}" != "${stage}" ]]; then
+  printf 'Network-hardening recovery context must match the reviewed stage: %s != %s\n' \
+    "${recovery_stage}" "${stage}" >&2
+  exit 2
+fi
 
 plan_json="$("${terraform_bin}" show -json "${plan_path}")"
 jq -e '.errored != true' <<<"${plan_json}" >/dev/null || {
@@ -94,7 +101,8 @@ jq -e \
   --arg address "${marker_address}" \
   --arg completion "${completion_address}" \
   --arg stage "${stage}" \
-  --arg previous "${previous}" '
+  --arg previous "${previous}" \
+  --arg recovery_stage "${recovery_stage}" '
     . as $plan
     | ($plan.resource_changes[] | select(.address == $completion)) as $completion_change
     | $plan.resource_changes[]
@@ -114,9 +122,12 @@ jq -e \
         )
         and (
           (
-            $stage == "network"
-            and $completion_change.change.before == null
+            $completion_change.change.before == null
             and $completion_change.change.actions == ["create"]
+            and (
+              $stage == "network"
+              or $recovery_stage == $stage
+            )
           )
           or (
             (
@@ -138,6 +149,7 @@ jq -e \
           (
             $completion_change.change.before == null
             and $completion_change.change.actions == ["create"]
+            and $recovery_stage == $stage
           )
           or (
             $completion_change.change.before.input == $stage

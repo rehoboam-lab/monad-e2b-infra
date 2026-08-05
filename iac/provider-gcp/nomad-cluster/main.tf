@@ -99,6 +99,7 @@ resource "terraform_data" "network_hardening_rollout_completion" {
       GCP_PROJECT_ID                  = var.gcp_project_id
       GCP_REGION                      = var.gcp_region
       GCP_ZONE                        = var.gcp_zone
+      DOMAIN_NAME                     = var.domain_name
       PREFIX                          = var.prefix
       NETWORK_HARDENING_ROLLOUT_STAGE = var.network_hardening_rollout_stage
       NETWORK_HARDENING_WAIT_SECONDS  = tostring(var.network_hardening_rollout_wait_seconds)

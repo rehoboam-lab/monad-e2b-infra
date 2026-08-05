@@ -925,6 +925,17 @@ variable "orchestrator_env_vars" {
   type      = map(string)
   default   = {}
   sensitive = true
+
+  validation {
+    condition = length(setintersection(
+      toset(keys(var.orchestrator_env_vars)),
+      toset([
+        "ALLOW_SANDBOX_INTERNAL_CIDRS",
+        "SANDBOX_ORCHESTRATOR_IP",
+      ]),
+    )) == 0
+    error_message = "orchestrator_env_vars cannot override ALLOW_SANDBOX_INTERNAL_CIDRS or SANDBOX_ORCHESTRATOR_IP; GCP guest isolation reserves both values."
+  }
 }
 
 variable "api_env_vars" {
