@@ -47,10 +47,11 @@ awk '
   capture
 ' "${provider_root}/Makefile" >"${apply_block}"
 apply_line="$(grep -nF '$(TF) apply -input=false' "${apply_block}" | cut -d: -f1)"
+lease_assert_line="$(grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" assert-held' "${apply_block}" | cut -d: -f1)"
 wait_line="$(grep -nF './scripts/wait-network-hardening-stage.sh' "${apply_block}" | cut -d: -f1)"
 release_line="$(grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' "${apply_block}" | tail -1 | cut -d: -f1)"
-[[ -n "${apply_line}" && -n "${wait_line}" && -n "${release_line}" ]]
-((apply_line < wait_line && wait_line < release_line))
+[[ -n "${lease_assert_line}" && -n "${apply_line}" && -n "${wait_line}" && -n "${release_line}" ]]
+((lease_assert_line < apply_line && apply_line < wait_line && wait_line < release_line))
 grep -F 'mutation_started=true' "${apply_block}" >/dev/null
 grep -F 'convergence_proven=true' "${apply_block}" >/dev/null
 grep -F 'preserving the shared lease and private recovery directory' \

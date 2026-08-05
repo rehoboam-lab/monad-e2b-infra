@@ -166,8 +166,10 @@ create-before-destroy rollout remains eligible only after the topology guard
 proves its MIG size and reviewed surge policy.
 
 The apply target consumes only the private verified copy of the reviewed stage plan, requires a
-stage-specific literal confirmation, rechecks the still-fresh checkpoint, and runs a second
-targeted plan that must report clean convergence. Failed planning leaves an older reviewed pair
+stage-specific literal confirmation, rechecks the still-fresh checkpoint, proves that the
+canonical GCS lease still has the token's exact generation and holder immediately before
+Terraform mutation, and runs a second targeted plan that must report clean convergence. Failed
+planning leaves an older reviewed pair
 untouched until the lease has been acquired; failed apply, residual drift, or
 lease-release failure preserves the plan and manifest for diagnosis.
 

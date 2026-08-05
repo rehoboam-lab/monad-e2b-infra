@@ -377,7 +377,8 @@ workload-cluster-plan:
 		)"; \
 		if [ -n "$${recovery_token}" ]; then \
 			./scripts/assert-network-hardening-recovery-token.sh \
-				"$${recovery_token}" "$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+				"$${recovery_token}" "$(TERRAFORM_STATE_BUCKET)" \
+				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
 				"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
@@ -397,6 +398,9 @@ workload-cluster-plan:
 		chmod 0600 "$${before_artifacts}"; \
 		before_fingerprint="$$($(workload_cluster_metadata_context) ./scripts/workload-plan-metadata.sh fingerprint \
 			"$(TF)" "." "../.." "$${before_artifacts}")"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${lease_token}"; \
 		$(tf_vars) TF_VAR_network_hardening_rollout_stage="$(WORKLOAD_CLUSTER_STAGE)" \
 			$(TF) plan $(TF_VAR_FILE_ARG) \
 			-target=module.cluster \
@@ -495,7 +499,6 @@ workload-cluster-apply:
 			if [ "$${lease_acquired}" = true ]; then \
 				if [ "$${lease_borrowed}" = true ] && [ "$${mutation_started}" = false ]; then \
 					printf "Recovery apply did not start a mutation; preserving its borrowed shared lease and token %s.\n" "$${lease_token}" >&2; \
-					lease_preserved=true; \
 				elif [ "$${mutation_started}" = true ] && [ "$${convergence_proven}" = false ]; then \
 					printf "Cluster mutation started but convergence was not proven; preserving the shared lease and private recovery directory %s.\n" "$${temp_dir}" >&2; \
 					printf "After proving the original apply is no longer running, use a fresh stage checkpoint and recover with WORKLOAD_CLUSTER_RECOVERY_TOKEN=%s CONFIRM='%s'.\n" "$${lease_token}" "$(WORKLOAD_CLUSTER_RECOVERY_CONFIRMATION)" >&2; \
@@ -525,7 +528,8 @@ workload-cluster-apply:
 		)"; \
 		if [ -n "$${recovery_token}" ]; then \
 			./scripts/assert-network-hardening-recovery-token.sh \
-				"$${recovery_token}" "$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+				"$${recovery_token}" "$(TERRAFORM_STATE_BUCKET)" \
+				"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
 				"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
 			lease_token="$${recovery_token}"; \
 			lease_borrowed=true; \
@@ -580,6 +584,9 @@ workload-cluster-apply:
 		$(workload_cluster_metadata_context) ./scripts/workload-plan-metadata.sh verify \
 			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
 			"$${after_artifacts}"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${lease_token}"; \
 		mutation_started=true; \
 		$(TF) apply -input=false "$${apply_plan}"; \
 		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
@@ -636,8 +643,12 @@ workload-cluster-recover-lease:
 			exit 1; \
 		}; \
 		./scripts/assert-network-hardening-recovery-token.sh \
-			"$${token}" "$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
+			"$${token}" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" \
 			"$(WORKLOAD_CLUSTER_STAGE)" ../.. >/dev/null; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${token}"; \
 		temp_dir="$$(mktemp -d ".workload-cluster-recover.$(ENV).XXXXXX")"; \
 		cleanup() { status=$$?; trap - EXIT HUP INT TERM; rm -rf -- "$${temp_dir}"; exit "$${status}"; }; \
 		trap cleanup EXIT HUP INT TERM; \
@@ -864,6 +875,9 @@ workload-prerequisite-apply:
 		$(workload_metadata_context) ./scripts/workload-plan-metadata.sh verify \
 			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
 			"$${after_artifacts}"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${lease_token}"; \
 		$(TF) apply -input=false "$${apply_plan}"; \
 		set +e; \
 		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
@@ -1089,6 +1103,9 @@ workload-apply:
 		$(workload_metadata_context) ./scripts/workload-plan-metadata.sh verify \
 			"$${apply_plan}" "$${apply_manifest}" "$(TF)" "." "../.." \
 			"$${after_artifacts}"; \
+		"$(WORKLOAD_ROLLOUT_LEASE)" assert-held \
+			"$(GCLOUD)" "$(TERRAFORM_STATE_BUCKET)" \
+			"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$${lease_token}"; \
 		$(TF) apply -input=false "$${apply_plan}"; \
 		set +e; \
 		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \

@@ -1000,6 +1000,24 @@ case "${1:-}" in
       ' >"${token}"
     chmod 0600 "${token}"
     ;;
+  assert-held)
+    [[ "$(cat "${WORKFLOW_MODE_FILE}")" != "lease-assert-fail" ]] || exit 1
+    token="${6:?missing token}"
+    jq -e \
+      --arg bucket "${3:?missing bucket}" \
+      --arg project "${4:?missing project}" \
+      --arg region "${5:?missing region}" '
+        .schema_version == 1
+        and .bucket == $bucket
+        and .project == $project
+        and .region == $region
+        and .uri == (
+          "gs://" + $bucket + "/operator-locks/" + $project + "/" + $region
+          + "/workload-mutation.json"
+        )
+        and ((.generation | tostring) | test("^[0-9]+$"))
+      ' "${token}" >/dev/null
+    ;;
   release)
     [[ "$(cat "${WORKFLOW_MODE_FILE}")" != "release-fail" ]] || exit 1
     rm -f -- "${3:?missing token}"
@@ -1316,6 +1334,25 @@ test -f "${workflow_cluster_manifest}"
 test -f "${cluster_recovery_token}"
 test "$(grep -c '^acquire ' "${workflow_lease_log}")" -eq 1
 test "$(grep -c '^release ' "${workflow_lease_log}" || true)" -eq 0
+cluster_apply_count_before="$(grep -c '^apply ' "${workflow_terraform_log}" || true)"
+printf 'lease-assert-fail\n' >"${workflow_mode}"
+expect_fail "borrowed recovery token must still own the live lease before apply" \
+  run_workflow_make workload-cluster-apply \
+    WORKLOAD_CLUSTER_RECOVERY_TOKEN="${cluster_recovery_token}" \
+    CONFIRM='APPLY NETWORK HARDENING network'
+test "$(grep -c '^apply ' "${workflow_terraform_log}" || true)" \
+  -eq "${cluster_apply_count_before}"
+test -f "${workflow_cluster_plan}"
+test -f "${workflow_cluster_manifest}"
+test -f "${cluster_recovery_token}"
+test "$(grep -c '^release ' "${workflow_lease_log}" || true)" -eq 0
+recovery_dir_count="$(
+  find "${workflow_provider}" -maxdepth 1 -type d \
+    -name '.workload-cluster-apply.dev.*' -print \
+    | wc -l | tr -d ' '
+)"
+test "${recovery_dir_count}" -eq 1
+printf 'pass\n' >"${workflow_mode}"
 expect_pass "post-drift recovery applies the reviewed retry before exact release" \
   run_workflow_make workload-cluster-apply \
     WORKLOAD_CLUSTER_RECOVERY_TOKEN="${cluster_recovery_token}" \
@@ -1416,6 +1453,10 @@ cluster_apply_line="$(
   grep -nF '$(TF) apply -input=false "$${apply_plan}"' \
     <<<"${cluster_apply_recipe}" | cut -d: -f1
 )"
+cluster_lease_assert_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" assert-held' \
+    <<<"${cluster_apply_recipe}" | cut -d: -f1
+)"
 cluster_convergence_line="$(
   grep -nF './scripts/wait-network-hardening-stage.sh' \
     <<<"${cluster_apply_recipe}" | cut -d: -f1
@@ -1424,6 +1465,7 @@ cluster_release_line="$(
   grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" release' \
     <<<"${cluster_apply_recipe}" | tail -1 | cut -d: -f1
 )"
+test "${cluster_lease_assert_line}" -lt "${cluster_apply_line}"
 test "${cluster_apply_line}" -lt "${cluster_convergence_line}"
 test "${cluster_convergence_line}" -lt "${cluster_release_line}"
 grep -F 'mutation_started=true' <<<"${cluster_apply_recipe}" >/dev/null
@@ -1439,6 +1481,10 @@ recovery_wait_line="$(
   grep -nF './scripts/wait-network-hardening-stage.sh' \
     <<<"${cluster_recovery_recipe}" | cut -d: -f1
 )"
+recovery_lease_assert_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" assert-held' \
+    <<<"${cluster_recovery_recipe}" | cut -d: -f1
+)"
 recovery_plan_line="$(
   grep -nF '$(TF) plan $(TF_VAR_FILE_ARG)' \
     <<<"${cluster_recovery_recipe}" | cut -d: -f1
@@ -1448,6 +1494,7 @@ recovery_release_line="$(
     <<<"${cluster_recovery_recipe}" | cut -d: -f1
 )"
 grep -F -- '-detailed-exitcode' <<<"${cluster_recovery_recipe}" >/dev/null
+test "${recovery_lease_assert_line}" -lt "${recovery_wait_line}"
 test "${recovery_wait_line}" -lt "${recovery_plan_line}"
 test "${recovery_plan_line}" -lt "${recovery_release_line}"
 grep -F './scripts/wait-workload-cluster.sh' \
@@ -1503,6 +1550,15 @@ grep -F 'CONFIRM' <<<"${workload_apply_recipe}" \
   | grep -F '$(WORKLOAD_CONFIRMATION)' >/dev/null
 grep -F '$(TF) apply -input=false "$${apply_plan}"' \
   <<<"${workload_apply_recipe}" >/dev/null
+workload_lease_assert_line="$(
+  grep -nF '"$(WORKLOAD_ROLLOUT_LEASE)" assert-held' \
+    <<<"${workload_apply_recipe}" | cut -d: -f1
+)"
+workload_terraform_apply_line="$(
+  grep -nF '$(TF) apply -input=false "$${apply_plan}"' \
+    <<<"${workload_apply_recipe}" | cut -d: -f1
+)"
+test "${workload_lease_assert_line}" -lt "${workload_terraform_apply_line}"
 test "$(
   grep -Fc './scripts/workload-plan-metadata.sh verify' \
     <<<"${workload_apply_recipe}"

@@ -70,6 +70,54 @@ uri_path="${FAKE_GCS_ROOT}/state-bucket/operator-locks/test-project/us-east4/wor
 [[ "$(stat -c '%a' "${token}" 2>/dev/null || stat -f '%Lp' "${token}")" == "600" ]]
 [[ -f "${uri_path}" ]]
 
+"${lease_script}" assert-held \
+  "${fake_gcloud}" state-bucket test-project us-east4 "${token}" >/dev/null
+[[ -f "${token}" && -f "${uri_path}" ]]
+
+if "${lease_script}" assert-held \
+  "${fake_gcloud}" other-state-bucket test-project us-east4 "${token}" \
+  >/dev/null 2>&1; then
+  printf 'Wrong expected bucket unexpectedly validated the live lease.\n' >&2
+  exit 1
+fi
+
+jq '
+  .bucket = "other-state-bucket"
+  | .uri = "gs://other-state-bucket/operator-locks/test-project/us-east4/workload-mutation.json"
+' "${token}" >"${temp_dir}/wrong-bucket-token.json"
+chmod 0600 "${temp_dir}/wrong-bucket-token.json"
+if "${lease_script}" assert-held \
+  "${fake_gcloud}" state-bucket test-project us-east4 \
+  "${temp_dir}/wrong-bucket-token.json" >/dev/null 2>&1; then
+  printf 'Self-consistent wrong-bucket token unexpectedly validated the canonical lease.\n' >&2
+  exit 1
+fi
+
+jq '.generation = "2"' "${uri_path}.meta" >"${temp_dir}/new-generation-meta.json"
+mv "${temp_dir}/new-generation-meta.json" "${uri_path}.meta"
+if "${lease_script}" assert-held \
+  "${fake_gcloud}" state-bucket test-project us-east4 "${token}" \
+  >/dev/null 2>&1; then
+  printf 'Stale-generation token unexpectedly validated the replaced lease.\n' >&2
+  exit 1
+fi
+[[ -f "${token}" && -f "${uri_path}" ]]
+jq '.generation = "1"' "${uri_path}.meta" >"${temp_dir}/original-generation-meta.json"
+mv "${temp_dir}/original-generation-meta.json" "${uri_path}.meta"
+
+jq '.custom_fields["monad-holder"] = "replacement-holder"' \
+  "${uri_path}.meta" >"${temp_dir}/replacement-holder-meta.json"
+mv "${temp_dir}/replacement-holder-meta.json" "${uri_path}.meta"
+if "${lease_script}" assert-held \
+  "${fake_gcloud}" state-bucket test-project us-east4 "${token}" \
+  >/dev/null 2>&1; then
+  printf 'Replaced-holder token unexpectedly validated the live lease.\n' >&2
+  exit 1
+fi
+jq --arg holder "${holder}" '.custom_fields["monad-holder"] = $holder' \
+  "${uri_path}.meta" >"${temp_dir}/original-holder-meta.json"
+mv "${temp_dir}/original-holder-meta.json" "${uri_path}.meta"
+
 if "${lease_script}" acquire \
   "${fake_gcloud}" state-bucket test-project us-east4 second-holder \
   "${temp_dir}/second-token.json" >/dev/null 2>&1; then
@@ -79,6 +127,12 @@ fi
 
 jq '.holder = "tampered-holder"' "${token}" >"${temp_dir}/tampered-token.json"
 chmod 0600 "${temp_dir}/tampered-token.json"
+if "${lease_script}" assert-held \
+  "${fake_gcloud}" state-bucket test-project us-east4 \
+  "${temp_dir}/tampered-token.json" >/dev/null 2>&1; then
+  printf 'Tampered holder unexpectedly validated the live lease.\n' >&2
+  exit 1
+fi
 if "${lease_script}" release \
   "${fake_gcloud}" "${temp_dir}/tampered-token.json" >/dev/null 2>&1; then
   printf 'Tampered holder unexpectedly released the lease.\n' >&2
