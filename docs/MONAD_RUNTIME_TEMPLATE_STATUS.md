@@ -161,12 +161,13 @@ E2B_IMAGE_ID=886b9312-c1b4-4e09-907e-9fdc6a6dc872
 
 ## Current invited-beta runtime: brokered Git bootstrap
 
-Status: built, verified, and registered in the TAMS `dev` environment by the
-protected operator workflow on 2026-08-05. The immutable build uses merged
-infra revision `97d88ab16b63e4ad229fdc431b4bb14c30524f1c` and merged TAMS
-revision `8230ee3082a46882e0ff905bada245bd48cf8059` (TAMS PR #269). The
-template ID remains the stable registered template identity; the image ID and
-immutable create reference identify this build.
+Status: built, verified, and registered in the TAMS `dev` environment by an
+operator workflow run at the exact current `main` revision on 2026-08-05. The
+immutable build uses merged infra revision
+`97d88ab16b63e4ad229fdc431b4bb14c30524f1c` and merged TAMS revision
+`8230ee3082a46882e0ff905bada245bd48cf8059` (TAMS PR #269). The template ID
+remains the stable registered template identity; the image ID and immutable
+create reference identify this build.
 
 Pinned provenance:
 
@@ -184,9 +185,9 @@ The build/verification workflow run
 [`31015567594`](https://github.com/rehoboam-lab/tams/actions/runs/31015567594)
 proved:
 
-- the Monad daemon was supervised and waiting on the mode-0600 root-only
-  credential-bootstrap socket, with no credential placed in the immutable
-  template;
+- the Monad daemon was supervised and waiting on a credential-bootstrap socket
+  whose measured filesystem mode was `0600`; the workflow did not assert the
+  socket UID/GID or perform an exhaustive immutable-image credential scan;
 - OpenCode 1.14.28, agent-browser 0.27.0, Playwright 1.60.0, Git 2.53.0,
   the Monad CLI, and the exact source provenance were present;
 - Chromium rendered the synthetic `monad-runtime-ok` page;
