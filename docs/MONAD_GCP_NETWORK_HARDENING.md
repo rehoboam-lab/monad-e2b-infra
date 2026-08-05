@@ -140,7 +140,8 @@ Do not apply this branch merely because validation is green.
    then run:
 
    ```bash
-   make workload-cluster-recover-lease WORKLOAD_CLUSTER_STAGE=<stage> \
+   mise exec -- make -C iac/provider-gcp workload-cluster-recover-lease \
+     WORKLOAD_CLUSTER_STAGE=<stage> \
      WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
      WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token> \
      CONFIRM='RELEASE NETWORK HARDENING LEASE <stage>'
@@ -152,10 +153,12 @@ Do not apply this branch merely because validation is green.
    apply it under the still-held lease:
 
    ```bash
-   make workload-cluster-plan WORKLOAD_CLUSTER_STAGE=<stage> \
+   mise exec -- make -C iac/provider-gcp workload-cluster-plan \
+     WORKLOAD_CLUSTER_STAGE=<stage> \
      WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
      WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token>
-   make workload-cluster-apply WORKLOAD_CLUSTER_STAGE=<stage> \
+   mise exec -- make -C iac/provider-gcp workload-cluster-apply \
+     WORKLOAD_CLUSTER_STAGE=<stage> \
      WORKLOAD_CLUSTER_CHECKPOINT=<checkpoint> \
      WORKLOAD_CLUSTER_RECOVERY_TOKEN=<preserved-token> \
      CONFIRM='APPLY NETWORK HARDENING <stage>'

@@ -28,6 +28,7 @@ expect_fail() {
 }
 
 cluster_source="${provider_root}/nomad-cluster/main.tf"
+runbook="${repo_root}/docs/MONAD_GCP_NETWORK_HARDENING.md"
 grep -F 'resource "terraform_data" "network_hardening_rollout_completion"' \
   "${cluster_source}" >/dev/null
 grep -F 'command = "\"${abspath("${path.module}/../scripts/wait-network-hardening-stage.sh")}\""' \
@@ -37,6 +38,23 @@ grep -F 'depends_on = [terraform_data.network_hardening_rollout_completion]' \
 if grep -R -n 'terraform_data\.network_hardening_rollout_stage' \
   "${provider_root}/nomad-cluster" >/dev/null; then
   printf 'stage marker must not remain upstream of a template, MIG, or firewall\n' >&2
+  exit 1
+fi
+
+for recovery_target in \
+  workload-cluster-recover-lease \
+  workload-cluster-plan \
+  workload-cluster-apply; do
+  grep -F "mise exec -- make -C iac/provider-gcp ${recovery_target}" \
+    "${runbook}" >/dev/null || {
+    printf 'Runbook target %s must execute from the provider Makefile.\n' \
+      "${recovery_target}" >&2
+    exit 1
+  }
+done
+if grep -Eq '^[[:space:]]+make workload-cluster-(recover-lease|plan|apply)' \
+  "${runbook}"; then
+  printf 'Runbook cannot invoke provider-only recovery targets from the repository root.\n' >&2
   exit 1
 fi
 
