@@ -362,7 +362,6 @@ acquire_gce_agent_identity() {
 : >"$calls"
 : >"$acquire_calls"
 refresh_gce_agent_identity us-east4 root
-[[ "$consul_active" == true ]]
 [[ ! -e "$pending_first_login" ]]
 [[ ! -s "$acquire_calls" ]]
 grep -Fqx 'start consul.service' "$calls"
