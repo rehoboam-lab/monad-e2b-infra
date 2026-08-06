@@ -28,11 +28,12 @@ locals {
   ])
 
   file_hash = {
-    "scripts/configure-docker-gcp.sh"     = filesha256("${path.module}/scripts/configure-docker-gcp.sh")
-    "scripts/fetch-gcp-secret.sh"         = filesha256("${path.module}/scripts/fetch-gcp-secret.sh")
-    "scripts/refresh-consul-resolvers.sh" = filesha256("${path.module}/scripts/refresh-consul-resolvers.sh")
-    "scripts/run-consul.sh"               = filesha256("${path.module}/scripts/run-consul.sh")
-    "scripts/run-nomad.sh"                = filesha256("${path.module}/scripts/run-nomad.sh")
+    "scripts/configure-docker-gcp.sh"      = filesha256("${path.module}/scripts/configure-docker-gcp.sh")
+    "scripts/consul-gce-agent-identity.sh" = filesha256("${path.module}/scripts/consul-gce-agent-identity.sh")
+    "scripts/fetch-gcp-secret.sh"          = filesha256("${path.module}/scripts/fetch-gcp-secret.sh")
+    "scripts/refresh-consul-resolvers.sh"  = filesha256("${path.module}/scripts/refresh-consul-resolvers.sh")
+    "scripts/run-consul.sh"                = filesha256("${path.module}/scripts/run-consul.sh")
+    "scripts/run-nomad.sh"                 = filesha256("${path.module}/scripts/run-nomad.sh")
   }
 
   network_hardening_stage_order = {
@@ -576,11 +577,12 @@ resource "google_project_iam_member" "logging_writer" {
 variable "setup_files" {
   type = map(string)
   default = {
-    "scripts/configure-docker-gcp.sh"     = "configure-docker-gcp",
-    "scripts/fetch-gcp-secret.sh"         = "fetch-gcp-secret",
-    "scripts/refresh-consul-resolvers.sh" = "refresh-consul-resolvers",
-    "scripts/run-nomad.sh"                = "run-nomad",
-    "scripts/run-consul.sh"               = "run-consul"
+    "scripts/configure-docker-gcp.sh"      = "configure-docker-gcp",
+    "scripts/consul-gce-agent-identity.sh" = "consul-gce-agent-identity",
+    "scripts/fetch-gcp-secret.sh"          = "fetch-gcp-secret",
+    "scripts/refresh-consul-resolvers.sh"  = "refresh-consul-resolvers",
+    "scripts/run-nomad.sh"                 = "run-nomad",
+    "scripts/run-consul.sh"                = "run-consul"
   }
 }
 

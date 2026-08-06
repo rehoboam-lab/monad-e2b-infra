@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly consul_script="$script_dir/../nomad-cluster/scripts/run-consul.sh"
+readonly gce_identity_script="$script_dir/../nomad-cluster/scripts/consul-gce-agent-identity.sh"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/e2b-consul-agent-token.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
 
@@ -21,6 +22,7 @@ sed \
   -e "s#readonly BASH_COMMONS_DIR=.*#readonly BASH_COMMONS_DIR=\"$test_root/bash-commons\"#" \
   -e "s#readonly BOOTSTRAP_RUNTIME_ROOT=.*#readonly BOOTSTRAP_RUNTIME_ROOT=\"$test_root/runtime\"#" \
   "$consul_script" >"$test_root/run-consul.sh"
+cp "$gce_identity_script" "$test_root/consul-gce-agent-identity.sh"
 
 # shellcheck source=/dev/null
 source "$test_root/run-consul.sh"

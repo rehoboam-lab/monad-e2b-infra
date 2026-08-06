@@ -15,6 +15,23 @@ readonly BOOTSTRAP_RUNTIME_ROOT="/run"
 readonly COMPUTE_INSTANCE_METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
 readonly GOOGLE_CLOUD_METADATA_REQUEST_HEADER="Metadata-Flavor: Google"
 readonly CLUSTER_SIZE_INSTANCE_METADATA_KEY_NAME="cluster-size"
+readonly GCE_AGENT_AUTH_METHOD="gce-instance-identity"
+readonly GCE_AGENT_AUTH_DESCRIPTION="Attested GCE Consul agent identity"
+readonly GCE_AGENT_BINDING_DESCRIPTION="Exact GCE agent node identity"
+readonly GCE_AGENT_TOKEN_TTL="1h"
+readonly GCE_AGENT_RUNTIME_DIR="/run/e2b-consul-agent"
+readonly GCE_AGENT_RUNTIME_CONFIG="$GCE_AGENT_RUNTIME_DIR/agent-token.json"
+readonly GCE_AGENT_RUNTIME_TOKEN="$GCE_AGENT_RUNTIME_DIR/agent-token"
+readonly GCE_AGENT_RECOVERY_TOKEN="$GCE_AGENT_RUNTIME_DIR/agent-recovery-token"
+readonly GCE_AGENT_RUNTIME_LEASE="$GCE_AGENT_RUNTIME_DIR/lease.json"
+readonly GCE_AGENT_BOOT_READY="$GCE_AGENT_RUNTIME_DIR/boot-ready.json"
+readonly GCE_AGENT_ROTATION_JOURNAL="$GCE_AGENT_RUNTIME_DIR/rotation-transaction"
+readonly GCE_AGENT_PENDING_REVOKE_DIR="$GCE_AGENT_RUNTIME_DIR/pending-revocations"
+readonly GCE_AGENT_LOCK_DIR="/run/e2b-consul-agent-lock"
+readonly GCE_AGENT_BOOTSTRAP_LOCK="$GCE_AGENT_LOCK_DIR/bootstrap.lock"
+readonly GCE_AGENT_MINIMUM_HEADROOM_SECONDS=900
+readonly GCE_AGENT_REFRESH_SERVICE="/etc/systemd/system/e2b-consul-agent-refresh.service"
+readonly GCE_AGENT_REFRESH_TIMER="/etc/systemd/system/e2b-consul-agent-refresh.timer"
 
 readonly DEFAULT_RAFT_PROTOCOL="3"
 
@@ -32,6 +49,41 @@ function curl_direct {
     -u HTTPS_PROXY -u https_proxy \
     -u NO_PROXY -u no_proxy \
     curl --disable --noproxy '*' "$@"
+}
+
+# Consul bootstrap operations are loopback-only and ignore ambient address,
+# proxy, TLS, namespace, partition, auth, and token variables.
+function consul_local {
+  env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    -u CONSUL_HTTP_ADDR -u CONSUL_HTTP_SSL -u CONSUL_HTTP_AUTH \
+    -u CONSUL_HTTP_TOKEN -u CONSUL_HTTP_TOKEN_FILE \
+    -u CONSUL_CACERT -u CONSUL_CAPATH \
+    -u CONSUL_CLIENT_CERT -u CONSUL_CLIENT_KEY -u CONSUL_TLS_SERVER_NAME \
+    -u CONSUL_NAMESPACE -u CONSUL_PARTITION \
+    CONSUL_HTTP_ADDR='http://127.0.0.1:8500' \
+    consul "$@"
+}
+
+function consul_local_with_token {
+  local -r token_file="$1"
+  shift
+  env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    -u CONSUL_HTTP_ADDR -u CONSUL_HTTP_SSL -u CONSUL_HTTP_AUTH \
+    -u CONSUL_HTTP_TOKEN -u CONSUL_HTTP_TOKEN_FILE \
+    -u CONSUL_CACERT -u CONSUL_CAPATH \
+    -u CONSUL_CLIENT_CERT -u CONSUL_CLIENT_KEY -u CONSUL_TLS_SERVER_NAME \
+    -u CONSUL_NAMESPACE -u CONSUL_PARTITION \
+    CONSUL_HTTP_ADDR='http://127.0.0.1:8500' \
+    CONSUL_HTTP_TOKEN_FILE="${token_file}" \
+    consul "$@"
 }
 
 if [[ ! -d "$BASH_COMMONS_DIR" ]]; then
@@ -53,6 +105,8 @@ function print_usage {
   echo
   echo -e "  --server\t\tIf set, run in server mode. Optional. Exactly one of --server or --client must be set."
   echo -e "  --client\t\tIf set, run in client mode. Optional. Exactly one of --server or --client must be set."
+  echo -e "  --refresh-gce-agent\tRefresh the ephemeral GCE-attested agent token and reload/start Consul."
+  echo -e "  --reload-gce-agent\tSynchronously reload Consul with this boot's local-only recovery token."
   echo -e "  --consul-token-file\tPath to the mode-0600 file containing the Consul ACL token."
   echo -e "  --consul-token-candidate-file\tPath to the mode-0600 candidate global-management token file (server mode)."
   echo -e "  --consul-token-candidate-version\tImmutable Secret Manager version for management-token lineage (server mode)."
@@ -72,6 +126,7 @@ function print_usage {
   echo -e "  --nomad-client-token-version\tImmutable Secret Manager version resource for Nomad-client token lineage (server mode)."
   echo -e "  --worker-autoscaler-token-file\tPath to the mode-0600 Consul token for the worker autoscaler's bounded leader lock."
   echo -e "  --worker-autoscaler-token-version\tImmutable Secret Manager version resource for worker-autoscaler token lineage (server mode)."
+  echo -e "  --gce-agent-service-account\tExact attached service-account email admitted to the GCE instance-identity auth method. Repeatable; server mode only."
   echo -e "  --enable-rpc-encryption\t\tEnable encryption of RPC traffic between nodes. Optional. Must also specify --ca-file-path, --cert-file-path and --key-file-path."
   echo -e "  --ca-path\t\tPath to the directory of CA files used to verify outgoing connections. Optional. Must be specified with --enable-rpc-encryption."
   echo -e "  --cert-file-path\tPath to the certificate file used to verify incoming connections. Optional. Must be specified with --enable-rpc-encryption and --key-file-path."
@@ -156,6 +211,35 @@ EOF
       "http://127.0.0.1:8500$path" >/dev/null
   )
 }
+
+function consul_api_put_file_result {
+  (
+    local -r consul_token="$1"
+    local -r path="$2"
+    local -r payload_file="$3"
+    local -r output_file="$4"
+    local request_dir
+    local curl_config
+
+    umask 077
+    request_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-api.XXXXXX")"
+    curl_config="$request_dir/request.curl"
+    trap 'rm -rf -- "$request_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cat >"$curl_config" <<EOF
+fail
+silent
+show-error
+header = "X-Consul-Token: $consul_token"
+header = "Content-Type: application/json"
+EOF
+    curl_direct --proto '=http' --config "$curl_config" \
+      --request PUT --data-binary "@$payload_file" --output "$output_file" \
+      "http://127.0.0.1:8500$path"
+    chmod 0600 "$output_file"
+  )
+}
+
 
 function consul_api_get_file {
   (
@@ -449,6 +533,14 @@ function get_instance_region {
   get_instance_metadata_value "instance/zone" | cut -d'/' -f4 | awk -F'-' '{ print $1"-"$2 }'
 }
 
+function get_instance_zone {
+  get_instance_metadata_value "instance/zone" | awk -F'/' '{print $NF}'
+}
+
+function get_instance_service_account_email {
+  get_instance_metadata_value "instance/service-accounts/default/email"
+}
+
 # Get the name of the current Compute Instance
 function get_instance_name {
   log_info "Looking up current Compute Instance name"
@@ -483,6 +575,8 @@ function split_by_lines {
     echo "${prefix}${var}"
   done
 }
+
+source "$SCRIPT_DIR/consul-gce-agent-identity.sh"
 
 function generate_consul_config {
   local -r server="${1}"
@@ -577,17 +671,12 @@ EOF
     gossip_encryption_configuration="\"encrypt\": \"$gossip_encryption_key\","
   fi
 
-  # Consul's internal anti-entropy loop needs the API/data Nomad client-sync
-  # token to deregister services on allocation shutdown. Use the dedicated
-  # agent slot, never default: unauthenticated HTTP requests must continue to
-  # receive the deny-default anonymous identity.
-  local agent_token_configuration=""
+  # The agent slot is populated only by the short-lived GCE-attested runtime
+  # config. The durable Nomad service-sync credential is a distinct identity
+  # and must never be reused as the Consul agent token.
   if [[ -n "$agent_token" ]]; then
-    agent_token_configuration=$(cat <<EOF
-,
-      "agent": "$agent_token"
-EOF
-    )
+    log_error "Static/shared Consul agent tokens are forbidden; use GCE instance identity"
+    return 1
   fi
 
   local rpc_encryption_configuration=""
@@ -618,7 +707,7 @@ EOF
     "default_policy": "deny",
     "enable_token_persistence": true,
     "tokens": {
-      "dns": "$dns_request_token"$agent_token_configuration
+      "dns": "$dns_request_token"
     }
   },
   "telemetry": {
@@ -681,6 +770,7 @@ Documentation=https://www.consul.io/
 Requires=network-online.target
 After=network-online.target
 ConditionFileNotEmpty=$config_path
+ConditionFileNotEmpty=$GCE_AGENT_RUNTIME_CONFIG
 EOF
   )
 
@@ -690,8 +780,8 @@ EOF
 Type=notify
 User=$consul_user
 Group=$consul_user
-ExecStart=$consul_bin_dir/consul agent -config-dir $consul_config_dir -data-dir $consul_data_dir
-ExecReload=$consul_bin_dir/consul reload
+ExecStart=$consul_bin_dir/consul agent -config-dir $consul_config_dir -config-file $GCE_AGENT_RUNTIME_CONFIG -data-dir $consul_data_dir
+ExecReload=$SCRIPT_DIR/run-consul.sh --reload-gce-agent
 ExecStop=$consul_bin_dir/consul leave
 KillMode=process
 Restart=on-failure
@@ -953,6 +1043,8 @@ function get_owner_home_dir {
 function run {
   local server="false"
   local client="false"
+  local refresh_gce_agent="false"
+  local reload_gce_agent="false"
   local config_dir=""
   local data_dir=""
   local systemd_stdout=""
@@ -988,6 +1080,7 @@ function run {
   local worker_autoscaler_token=""
   local worker_autoscaler_token_version=""
   local consul_agent_token=""
+  local gce_agent_service_accounts=()
 
   while [[ $# -gt 0 ]]; do
     local key="$1"
@@ -998,6 +1091,12 @@ function run {
       ;;
     --client)
       client="true"
+      ;;
+    --refresh-gce-agent)
+      refresh_gce_agent="true"
+      ;;
+    --reload-gce-agent)
+      reload_gce_agent="true"
       ;;
     --consul-token-file)
       read_secret_file "$key" "$2"
@@ -1126,6 +1225,11 @@ function run {
       worker_autoscaler_token_version="$2"
       shift
       ;;
+    --gce-agent-service-account)
+      assert_not_empty "$key" "$2"
+      gce_agent_service_accounts+=("$2")
+      shift
+      ;;
     --enable-rpc-encryption)
       enable_rpc_encryption="true"
       ;;
@@ -1174,20 +1278,45 @@ function run {
     shift
   done
 
-  if [[ ("$server" == "true" && "$client" == "true") || ("$server" == "false" && "$client" == "false") ]]; then
-    log_error "Exactly one of --server or --client must be set."
+  local mode_count=0
+  [[ "$server" == true ]] && mode_count=$((mode_count + 1))
+  [[ "$client" == true ]] && mode_count=$((mode_count + 1))
+  [[ "$refresh_gce_agent" == true ]] && mode_count=$((mode_count + 1))
+  [[ "$reload_gce_agent" == true ]] && mode_count=$((mode_count + 1))
+  if [[ "$mode_count" -ne 1 ]]; then
+    log_error "Exactly one of --server, --client, --refresh-gce-agent, or --reload-gce-agent must be set."
     exit 1
   fi
 
-  assert_not_empty "--dns-request-token-file" "$dns_request_token"
-  if [[ "$client" == "true" ]]; then
-    assert_not_empty "--nomad-client-token-file" "$nomad_client_token"
-    consul_agent_token="$nomad_client_token"
+  if [[ "$refresh_gce_agent" == false && "$reload_gce_agent" == false ]]; then
+    assert_not_empty "--dns-request-token-file" "$dns_request_token"
   fi
-
   assert_is_installed "systemctl"
   assert_is_installed "curl"
   assert_is_installed "jq"
+  assert_is_installed "openssl"
+  assert_is_installed "sha256sum"
+  assert_is_installed "flock"
+
+  if [[ "$reload_gce_agent" == true ]]; then
+    reload_gce_agent_identity
+    return
+  fi
+
+  if [[ "$refresh_gce_agent" == true ]]; then
+    acquire_gce_agent_bootstrap_lock nonblock
+  else
+    acquire_gce_agent_bootstrap_lock wait
+  fi
+
+  if [[ "$refresh_gce_agent" == true ]]; then
+    assert_not_empty "--user" "$user"
+    if [[ -z "$datacenter" ]]; then
+      datacenter="$(get_instance_region)"
+    fi
+    refresh_gce_agent_identity "$datacenter" "$user"
+    return
+  fi
 
   if [[ -z "$config_dir" ]]; then
     config_dir=$(cd "$SCRIPT_DIR/../config" && pwd)
@@ -1248,8 +1377,15 @@ function run {
       "${recursors[@]}"
   fi
 
+  initialize_gce_agent_runtime_config "$user"
   generate_systemd_config "$SYSTEMD_CONFIG_PATH" "$config_dir" "$data_dir" "$systemd_stdout" "$systemd_stderr" "$bin_dir" "$user" "${environment[@]}"
   start_consul
+
+  if [[ "$client" == "true" ]]; then
+    assert_not_empty "--cluster-tag-name" "$cluster_tag_name"
+    acquire_gce_agent_identity "$datacenter" "$user"
+    activate_current_gce_agent_generation
+  fi
 
   if [[ "$server" == "true" ]]; then
     bootstrap "$consul_token"
@@ -1260,6 +1396,10 @@ function run {
     assert_not_empty "--nomad-client-token-version" "$nomad_client_token_version"
     assert_not_empty "--worker-autoscaler-token-file" "$worker_autoscaler_token"
     assert_not_empty "--worker-autoscaler-token-version" "$worker_autoscaler_token_version"
+    [[ "${#gce_agent_service_accounts[@]}" -gt 0 ]] || {
+      log_error "At least one --gce-agent-service-account is required in server mode"
+      exit 1
+    }
     setup_management_access \
       "$consul_token" "$consul_token_candidate" "$consul_token_candidate_version"
     setup_dns_resolving \
@@ -1267,7 +1407,19 @@ function run {
       "$dns_request_token" "$dns_request_token_version" \
       "$nomad_client_token" "$nomad_client_token_version" \
       "$worker_autoscaler_token" "$worker_autoscaler_token_version"
+    setup_gce_agent_auth \
+      "$consul_token_candidate" "$(get_instance_project_id)" "$datacenter" \
+      "${gce_agent_service_accounts[@]}"
+    acquire_gce_agent_identity "$datacenter" "$user"
+    # The replacement server initially joins with only its per-boot recovery
+    # slot so it can reconcile the auth method. Restart it once to install the
+    # exact short-lived node identity.
+    start_consul
   fi
+  systemctl is-active --quiet consul.service
+  acknowledge_gce_agent_login_token "$GCE_AGENT_RUNTIME_TOKEN"
+  mark_gce_agent_boot_ready "$(get_instance_id)"
+  install_gce_agent_refresh_timer "$datacenter" "$user"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -21,6 +21,10 @@ exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&
 bootstrap_complete=false
 quiesce_orchestrators() {
   set +e
+  systemctl stop e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  systemctl disable e2b-consul-agent-refresh.timer >/dev/null 2>&1
+  systemctl mask --runtime e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  rm -f -- /run/e2b-consul-agent/boot-ready.json
   supervisorctl stop nomad >/dev/null 2>&1
   rm -f -- /etc/supervisor/conf.d/run-nomad.conf
   supervisorctl reread >/dev/null 2>&1
@@ -280,9 +284,9 @@ install_setup_script() {
   mv -f -- "$tmp" "$target"
 }
 
-install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
-install_setup_script configure-docker-gcp "$CONFIGURE_DOCKER_FILE_HASH" /opt/configure-docker-gcp.sh
-install_setup_script refresh-consul-resolvers "$REFRESH_CONSUL_RESOLVERS_FILE_HASH" /opt/e2b/bin/refresh-consul-resolvers.sh
+install_setup_script run-nomad "${RUN_NOMAD_FILE_HASH}" /opt/nomad/bin/run-nomad.sh
+install_setup_script configure-docker-gcp "${CONFIGURE_DOCKER_FILE_HASH}" /opt/configure-docker-gcp.sh
+install_setup_script refresh-consul-resolvers "${REFRESH_CONSUL_RESOLVERS_FILE_HASH}" /opt/e2b/bin/refresh-consul-resolvers.sh
 
 /opt/configure-docker-gcp.sh "${GCP_REGION}-docker.pkg.dev"
 

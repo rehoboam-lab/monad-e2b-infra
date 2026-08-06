@@ -17,6 +17,10 @@ bootstrap_complete=false
 acl_dir=""
 quiesce_orchestrators() {
   set +e
+  systemctl stop e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  systemctl disable e2b-consul-agent-refresh.timer >/dev/null 2>&1
+  systemctl mask --runtime e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  rm -f -- /run/e2b-consul-agent/boot-ready.json
   supervisorctl stop nomad >/dev/null 2>&1
   rm -f -- /etc/supervisor/conf.d/run-nomad.conf
   supervisorctl reread >/dev/null 2>&1
@@ -87,10 +91,11 @@ install_setup_script() {
   mv -f -- "$tmp" "$target"
 }
 
-install_setup_script run-consul "$RUN_CONSUL_FILE_HASH" /opt/consul/bin/run-consul.sh
-install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
-install_setup_script fetch-gcp-secret "$FETCH_GCP_SECRET_FILE_HASH" /opt/fetch-gcp-secret.sh
-install_setup_script configure-docker-gcp "$CONFIGURE_DOCKER_FILE_HASH" /opt/configure-docker-gcp.sh
+install_setup_script run-consul "${RUN_CONSUL_FILE_HASH}" /opt/consul/bin/run-consul.sh
+install_setup_script consul-gce-agent-identity "${CONSUL_GCE_AGENT_FILE_HASH}" /opt/consul/bin/consul-gce-agent-identity.sh
+install_setup_script run-nomad "${RUN_NOMAD_FILE_HASH}" /opt/nomad/bin/run-nomad.sh
+install_setup_script fetch-gcp-secret "${FETCH_GCP_SECRET_FILE_HASH}" /opt/fetch-gcp-secret.sh
+install_setup_script configure-docker-gcp "${CONFIGURE_DOCKER_FILE_HASH}" /opt/configure-docker-gcp.sh
 
 umask 077
 acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
@@ -117,7 +122,7 @@ systemctl restart systemd-resolved
     --enable-gossip-encryption \
     --gossip-encryption-key-file "$acl_dir/gossip" \
     --dns-request-token-file "$acl_dir/consul-dns" \
-    --nomad-client-token-file "$acl_dir/consul"
+    --dns-request-token-version "${CONSUL_DNS_TOKEN_SECRET_NAME}"
 
 /opt/nomad/bin/run-nomad.sh --client --consul-token-file "$acl_dir/consul" --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}"
 bootstrap_complete=true

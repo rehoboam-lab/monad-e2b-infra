@@ -91,7 +91,7 @@ done
 sed -n '/^  file_hash = {$/,/^  }$/p' "${provider_root}/nomad-cluster/main.tf" \
   | grep -F '= filesha256(' \
   | wc -l | tr -d ' ' \
-  | grep -Fx '5' >/dev/null
+  | grep -Fx '6' >/dev/null
 if grep -F 'substr(filesha256' "${provider_root}/nomad-cluster/main.tf" >/dev/null; then
   printf 'Setup object provenance still truncates SHA-256.\n' >&2
   exit 1

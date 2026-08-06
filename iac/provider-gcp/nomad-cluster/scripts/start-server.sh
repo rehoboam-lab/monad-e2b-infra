@@ -20,6 +20,10 @@ health_token_tmp=""
 health_script_tmp=""
 quiesce_orchestrators() {
   set +e
+  systemctl stop e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  systemctl disable e2b-consul-agent-refresh.timer >/dev/null 2>&1
+  systemctl mask --runtime e2b-consul-agent-refresh.timer e2b-consul-agent-refresh.service >/dev/null 2>&1
+  rm -f -- /run/e2b-consul-agent/boot-ready.json
   supervisorctl stop nomad-voter-health >/dev/null 2>&1
   supervisorctl stop nomad >/dev/null 2>&1
   rm -f -- \
@@ -83,9 +87,10 @@ install_setup_script() {
   mv -f -- "$tmp" "$target"
 }
 
-install_setup_script run-consul "$RUN_CONSUL_FILE_HASH" /opt/consul/bin/run-consul.sh
-install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
-install_setup_script fetch-gcp-secret "$FETCH_GCP_SECRET_FILE_HASH" /opt/fetch-gcp-secret.sh
+install_setup_script run-consul "${RUN_CONSUL_FILE_HASH}" /opt/consul/bin/run-consul.sh
+install_setup_script consul-gce-agent-identity "${CONSUL_GCE_AGENT_FILE_HASH}" /opt/consul/bin/consul-gce-agent-identity.sh
+install_setup_script run-nomad "${RUN_NOMAD_FILE_HASH}" /opt/nomad/bin/run-nomad.sh
+install_setup_script fetch-gcp-secret "${FETCH_GCP_SECRET_FILE_HASH}" /opt/fetch-gcp-secret.sh
 
 # Keep the Nomad credential out of argv, logs, process-wide environment, and
 # Supervisor configuration. Populate the reviewed /run contract directly from
@@ -118,6 +123,13 @@ acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
 /opt/fetch-gcp-secret.sh "${CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME}" "$acl_dir/consul-nomad-client" uuid
 /opt/fetch-gcp-secret.sh "${CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME}" "$acl_dir/consul-worker-autoscaler" uuid
 
+IFS=',' read -r -a gce_agent_service_accounts <<<"${CONSUL_GCE_AGENT_SERVICE_ACCOUNTS}"
+gce_agent_service_account_args=()
+for service_account in "$${gce_agent_service_accounts[@]}"; do
+  [[ "$service_account" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]]
+  gce_agent_service_account_args+=(--gce-agent-service-account "$service_account")
+done
+
 /opt/consul/bin/run-consul.sh \
   --server \
   --cluster-tag-name "${CLUSTER_TAG_NAME}" \
@@ -130,6 +142,7 @@ acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
   --nomad-client-token-version "${CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME}" \
   --worker-autoscaler-token-file "$acl_dir/consul-worker-autoscaler" \
   --worker-autoscaler-token-version "${CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME}" \
+  "$${gce_agent_service_account_args[@]}" \
   --enable-gossip-encryption \
   --gossip-encryption-key-file "$acl_dir/gossip"
 /opt/nomad/bin/run-nomad.sh \

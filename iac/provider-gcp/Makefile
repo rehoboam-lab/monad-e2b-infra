@@ -137,11 +137,15 @@ WORKLOAD_CLUSTER_REFRESH_STAGE ?=
 ACL_RUNTIME_JOB_PHASE ?=
 ACL_RUNTIME_JOB_CHECKPOINT ?=
 ACL_RUNTIME_JOB_RECOVERY_TOKEN ?=
+ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT ?=
 CONSUL_LEGACY_VERSION_RESOURCE ?=
 CONSUL_CANDIDATE_VERSION_RESOURCE ?=
 CONSUL_UNREGISTERED_VERSION_RESOURCE ?=
 CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT ?=
 CONSUL_HANDOFF_EVIDENCE ?= .consul-management-handoff.$(ENV).json
+CONSUL_HANDOFF_BUILD_CHECKPOINT ?=
+override CONSUL_HANDOFF_POST_API_EVIDENCE := .acl-runtime-job.post-api.$(ENV).evidence.json
+override ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE := .acl-runtime-job.pre-server.$(ENV).evidence.json
 CONSUL_HANDOFF_POST_PLAN ?= .tfplan.consul-handoff-post.$(ENV)
 override CONSUL_HANDOFF_POST_PLAN_MANIFEST := $(CONSUL_HANDOFF_POST_PLAN).manifest
 override ACL_RUNTIME_JOB_STAGE_pre-server := network
@@ -229,6 +233,7 @@ override WORKLOAD_CLUSTER_RECOVERY_CONFIRMATION := RELEASE NETWORK HARDENING LEA
 override WORKLOAD_CLUSTER_REBIND_CONFIRMATION := REBIND NETWORK HARDENING LEASE $(WORKLOAD_CLUSTER_STAGE)
 override ACL_RUNTIME_JOB_CONFIRMATION := APPLY ACL RUNTIME JOBS $(ACL_RUNTIME_JOB_PHASE)
 override CONSUL_HANDOFF_CONFIRMATION := PREPARE CONSUL MANAGEMENT HANDOFF
+override CONSUL_HANDOFF_RETIRE_CONFIRMATION := RETIRE CONSUL MANAGEMENT LINEAGE
 override WORKLOAD_PREREQUISITE_TARGETS := \
 	-target='module.init.terraform_data.acl_bootstrap_environment_guard' \
 	-target='google_secret_manager_secret_version.postgres_connection_string' \
@@ -438,9 +443,13 @@ keyless-runtime-check:
 	@ ./scripts/test-acl-secret-manager-bootstrap.sh
 	@ ./scripts/test-consul-resolver-refresh.sh
 	@ ./scripts/test-consul-agent-token-config.sh
+	@ ./scripts/test-consul-agent-acquire-cleanup.sh
+	@ ./scripts/test-consul-agent-refresh.sh
+	@ ./scripts/test-consul-agent-production-wiring.sh
 	@ ./scripts/test-nomad-consul-boundaries.sh
 	@ ./scripts/test-nomad-consul-sync-integration.sh
 	@ ./scripts/test-consul-management-handoff.sh
+	@ ./scripts/test-consul-handoff-make-wiring.sh
 	@ ./scripts/test-consul-handoff-post-plan.sh
 	@ ./scripts/test-nomad-provider-consul-token-capture.sh "$(TF)"
 	@ ./scripts/test-acl-runtime-job-plan.sh
@@ -497,6 +506,11 @@ workload-cluster-stage-guard:
 		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
 	@ case "$(WORKLOAD_CLUSTER_STAGE)" in \
 		server|server-health|api|worker|build) \
+			$(MAKE) --no-print-directory acl-runtime-job-pre-server-evidence-guard ;; \
+		*) ;; \
+	esac
+	@ case "$(WORKLOAD_CLUSTER_STAGE)" in \
+		server|server-health|api|worker|build) \
 				test -n "$(CONSUL_LEGACY_VERSION_RESOURCE)" \
 				&& test -n "$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
 				&& test -n "$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
@@ -515,6 +529,12 @@ workload-cluster-stage-guard:
 			terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
 			terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
 			terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+			handoff_status="$$(jq -er '.status' "$(CONSUL_HANDOFF_EVIDENCE)")"; \
+			case "$$handoff_status" in \
+				staged) handoff_mode=verify-staged ;; \
+				retired) handoff_mode=verify ;; \
+				*) printf "Unknown Consul handoff evidence status: %s\n" "$$handoff_status" >&2; exit 1 ;; \
+			esac; \
 			GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 			GCP_REGION="$(GCP_REGION)" \
 			PREFIX="$(PREFIX)" \
@@ -525,18 +545,19 @@ workload-cluster-stage-guard:
 			CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
 			CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
 			CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+			CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
 			GCLOUD_BIN="$(GCLOUD)" \
-			./scripts/consul-management-handoff.sh verify ;; \
+			./scripts/consul-management-handoff.sh "$$handoff_mode" ;; \
 		*) ;; \
 	esac
 
-.PHONY: consul-management-handoff-prepare consul-management-handoff-verify consul-management-handoff-post-plan
-consul-management-handoff-prepare:
+.PHONY: consul-management-handoff-stage consul-management-handoff-verify-staged consul-management-handoff-retire consul-management-handoff-verify consul-management-handoff-post-plan
+consul-management-handoff-stage:
 	@ if [ "$(CONFIRM)" != "$(CONSUL_HANDOFF_CONFIRMATION)" ]; then \
 		printf "Refusing Consul management handoff. Re-run with CONFIRM='%s'.\n" "$(CONSUL_HANDOFF_CONFIRMATION)"; \
 		exit 1; \
 	fi
-	@ $(MAKE) workload-context-guard
+	@ $(MAKE) workload-context-guard acl-runtime-job-pre-server-evidence-guard
 	@ test "$(TERRAFORM_ENVIRONMENT)" = "dev" || (printf "Consul management handoff is restricted to the dev invited-beta fleet.\n"; exit 1)
 	@ test -n "$(CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT)" || (printf "CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT must name the reviewed server-safety checkpoint.\n"; exit 1)
 	@ ./scripts/assert-network-hardening-checkpoint.sh \
@@ -555,8 +576,56 @@ consul-management-handoff-prepare:
 		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
 		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
 		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_PRE_SERVER_ACL_EVIDENCE="$(ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE)" \
+		CONSUL_HANDOFF_ENVIRONMENT="$(TERRAFORM_ENVIRONMENT)" \
+		CONSUL_HANDOFF_NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
+		CONSUL_HANDOFF_NOMAD_BASE_URL="https://nomad.$(DOMAIN_NAME)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
 		GCLOUD_BIN="$(GCLOUD)" \
-		./scripts/consul-management-handoff.sh prepare
+		./scripts/consul-management-handoff.sh stage
+
+consul-management-handoff-verify-staged:
+	@ $(MAKE) workload-context-guard
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" GCP_REGION="$(GCP_REGION)" PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh verify-staged
+
+consul-management-handoff-retire:
+	@ if [ "$(CONFIRM)" != "$(CONSUL_HANDOFF_RETIRE_CONFIRMATION)" ]; then \
+		printf "Refusing Consul management retirement. Re-run with CONFIRM='%s' and the evidence-bound CONSUL_RETIRE_CONFIRMATION.\n" "$(CONSUL_HANDOFF_RETIRE_CONFIRMATION)"; \
+		exit 1; \
+	fi
+	@ $(MAKE) workload-context-guard
+	@ test -n "$(CONSUL_HANDOFF_BUILD_CHECKPOINT)" || (printf "CONSUL_HANDOFF_BUILD_CHECKPOINT is required.\n"; exit 1)
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" GCP_REGION="$(GCP_REGION)" PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_POST_API_EVIDENCE="$(CONSUL_HANDOFF_POST_API_EVIDENCE)" \
+		CONSUL_HANDOFF_BUILD_CHECKPOINT="$(CONSUL_HANDOFF_BUILD_CHECKPOINT)" \
+		CONSUL_HANDOFF_NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
+		CONSUL_HANDOFF_NOMAD_BASE_URL="https://nomad.$(DOMAIN_NAME)" \
+		CONSUL_RETIRE_CONFIRMATION="$(CONSUL_RETIRE_CONFIRMATION)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		CONSUL_HANDOFF_REPO_ROOT="../.." GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh retire
 
 consul-management-handoff-verify:
 	@ $(MAKE) workload-context-guard
@@ -573,11 +642,12 @@ consul-management-handoff-verify:
 		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
 		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
 		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
 		GCLOUD_BIN="$(GCLOUD)" \
 		./scripts/consul-management-handoff.sh verify
 
 consul-management-handoff-post-plan:
-	@ $(MAKE) workload-context-guard consul-management-handoff-verify
+	@ $(MAKE) workload-context-guard consul-management-handoff-verify-staged
 	@ rm -f -- "$(CONSUL_HANDOFF_POST_PLAN)" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)"
 	@ set -eu; \
 		temp_dir="$$(mktemp -d ".consul-handoff-post-plan.$(ENV).XXXXXX")"; \
@@ -622,7 +692,17 @@ consul-management-handoff-post-plan:
 	@ printf "Saved read-only Consul post-handoff plan and provenance for server-stage review: %s and %s\n" \
 		"$(CONSUL_HANDOFF_POST_PLAN)" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)"
 
-.PHONY: acl-runtime-job-phase-guard acl-runtime-job-plan acl-runtime-job-apply
+.PHONY: acl-runtime-job-pre-server-evidence-guard acl-runtime-job-phase-guard acl-runtime-job-plan acl-runtime-job-apply
+acl-runtime-job-pre-server-evidence-guard:
+	@ test -n "$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" || (printf "ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT must name the exact reviewed network checkpoint.\n"; exit 1)
+	@ ./scripts/assert-network-hardening-checkpoint.sh \
+		"network" "$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+	@ ./scripts/assert-acl-runtime-job-evidence.sh \
+		"$(ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE)" "pre-server" "$(TERRAFORM_ENVIRONMENT)" \
+		"$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+
 acl-runtime-job-phase-guard:
 	@ printf '%s' "$(ACL_RUNTIME_JOB_PHASE)" | grep -Eq '^(pre-server|post-api)$$' || (printf "ACL_RUNTIME_JOB_PHASE must be pre-server or post-api.\n"; exit 1)
 	@ test "$(TERRAFORM_ENVIRONMENT)" = "dev" || (printf "ACL runtime-job handoff is restricted to the dev invited-beta fleet.\n"; exit 1)

@@ -15,7 +15,9 @@ rm -rf -- "${script_dir}/__pycache__"
 grep -F 'compute ssh "${selected_server}"' "${handoff_script}" >/dev/null
 grep -F -- '--tunnel-through-iap' "${handoff_script}" >/dev/null
 grep -F -- '-L127.0.0.1:${local_port}:127.0.0.1:8500' "${handoff_script}" >/dev/null
-grep -F 'consul-management-handoff-prepare:' "${provider_root}/Makefile" >/dev/null
+grep -F 'consul-management-handoff-stage:' "${provider_root}/Makefile" >/dev/null
+grep -F 'consul-management-handoff-verify-staged:' "${provider_root}/Makefile" >/dev/null
+grep -F 'consul-management-handoff-retire:' "${provider_root}/Makefile" >/dev/null
 grep -F 'consul-management-handoff-verify:' "${provider_root}/Makefile" >/dev/null
 grep -F 'consul-management-handoff-post-plan:' "${provider_root}/Makefile" >/dev/null
 

@@ -21,12 +21,18 @@ locals {
     CONSUL_TOKEN_CANDIDATE_SECRET_NAME         = var.consul_acl_token_candidate_secret_version_name
     FETCH_GCP_SECRET_FILE_HASH                 = local.file_hash["scripts/fetch-gcp-secret.sh"]
     RUN_CONSUL_FILE_HASH                       = local.file_hash["scripts/run-consul.sh"]
+    CONSUL_GCE_AGENT_FILE_HASH                 = local.file_hash["scripts/consul-gce-agent-identity.sh"]
     RUN_NOMAD_FILE_HASH                        = local.file_hash["scripts/run-nomad.sh"]
     NOMAD_VOTER_HEALTH_SCRIPT                  = file("${path.module}/scripts/nomad-voter-health.py")
     CONSUL_GOSSIP_SECRET_NAME                  = local.consul_gossip_secret_version_name
     CONSUL_DNS_TOKEN_SECRET_NAME               = local.consul_catalog_read_secret_version_name
     CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME      = local.consul_nomad_client_sync_secret_version_name
     CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME = local.consul_worker_autoscaler_secret_version_name
+    CONSUL_GCE_AGENT_SERVICE_ACCOUNTS = join(",", sort(distinct([
+      var.nomad_server_service_account_email,
+      var.api_controller_service_account_email,
+      var.data_node_service_account_email,
+    ])))
   })
 }
 
@@ -269,6 +275,7 @@ resource "google_compute_instance_template" "server" {
     google_secret_manager_secret_iam_member.bootstrap_server,
     google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
+    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/consul-gce-agent-identity.sh"],
   ]
 }
