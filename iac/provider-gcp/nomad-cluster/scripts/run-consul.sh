@@ -25,6 +25,15 @@ readonly DEFAULT_AUTOPILOT_SERVER_STABILIZATION_TIME="10s"
 readonly DEFAULT_AUTOPILOT_REDUNDANCY_ZONE_TAG="az"
 readonly DEFAULT_AUTOPILOT_DISABLE_UPGRADE_MIGRATION="false"
 
+function curl_direct {
+  env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    curl --disable --noproxy '*' "$@"
+}
+
 if [[ ! -d "$BASH_COMMONS_DIR" ]]; then
   echo "ERROR: this script requires that bash-commons is installed in $BASH_COMMONS_DIR. See https://github.com/gruntwork-io/bash-commons for more info."
   exit 1
@@ -45,6 +54,8 @@ function print_usage {
   echo -e "  --server\t\tIf set, run in server mode. Optional. Exactly one of --server or --client must be set."
   echo -e "  --client\t\tIf set, run in client mode. Optional. Exactly one of --server or --client must be set."
   echo -e "  --consul-token-file\tPath to the mode-0600 file containing the Consul ACL token."
+  echo -e "  --consul-token-candidate-file\tPath to the mode-0600 candidate global-management token file (server mode)."
+  echo -e "  --consul-token-candidate-version\tImmutable Secret Manager version for management-token lineage (server mode)."
   echo -e "  --cluster-tag-name\tAutomatically form a cluster with Instances that have the same value for this Compute Instance tag name. Optional."
   echo -e "  --datacenter\t\tThe name of the datacenter Consul is running in. Optional. If not specified, will default to GCP region name."
   echo -e "  --config-dir\t\tThe path to the Consul config folder. Optional. Default is the absolute path of '../config', relative to this script."
@@ -56,6 +67,11 @@ function print_usage {
   echo -e "  --enable-gossip-encryption\t\tEnable encryption of gossip traffic between nodes. Optional. Must also specify --gossip-encryption-key."
   echo -e "  --gossip-encryption-key-file\tPath to the mode-0600 gossip encryption key file."
   echo -e "  --dns-request-token-file\tPath to the mode-0600 Consul DNS token file."
+  echo -e "  --dns-request-token-version\tImmutable Secret Manager version resource for DNS-token lineage (server mode)."
+  echo -e "  --nomad-client-token-file\tPath to the mode-0600 Consul token for API/data Nomad client service sync."
+  echo -e "  --nomad-client-token-version\tImmutable Secret Manager version resource for Nomad-client token lineage (server mode)."
+  echo -e "  --worker-autoscaler-token-file\tPath to the mode-0600 Consul token for the worker autoscaler's bounded leader lock."
+  echo -e "  --worker-autoscaler-token-version\tImmutable Secret Manager version resource for worker-autoscaler token lineage (server mode)."
   echo -e "  --enable-rpc-encryption\t\tEnable encryption of RPC traffic between nodes. Optional. Must also specify --ca-file-path, --cert-file-path and --key-file-path."
   echo -e "  --ca-path\t\tPath to the directory of CA files used to verify outgoing connections. Optional. Must be specified with --enable-rpc-encryption."
   echo -e "  --cert-file-path\tPath to the certificate file used to verify incoming connections. Optional. Must be specified with --enable-rpc-encryption and --key-file-path."
@@ -86,7 +102,10 @@ function get_instance_metadata_value {
   local -r path="$1"
 
   log_info "Looking up Metadata value at $COMPUTE_INSTANCE_METADATA_URL/$path"
-  curl --silent --show-error --location --header "$GOOGLE_CLOUD_METADATA_REQUEST_HEADER" "$COMPUTE_INSTANCE_METADATA_URL/$path"
+  curl_direct --proto '=http' --proto-redir '=http' \
+    --silent --show-error --location \
+    --header "$GOOGLE_CLOUD_METADATA_REQUEST_HEADER" \
+    "$COMPUTE_INSTANCE_METADATA_URL/$path"
 }
 
 function read_secret_file {
@@ -132,8 +151,276 @@ show-error
 header = "X-Consul-Token: $consul_token"
 header = "Content-Type: application/json"
 EOF
-    curl --config "$curl_config" --request PUT --data-binary "@$payload_file" \
+    curl_direct --proto '=http' --config "$curl_config" \
+      --request PUT --data-binary "@$payload_file" \
       "http://127.0.0.1:8500$path" >/dev/null
+  )
+}
+
+function consul_api_get_file {
+  (
+    local -r consul_token="$1"
+    local -r path="$2"
+    local -r output_file="$3"
+    local request_dir
+    local curl_config
+
+    umask 077
+    request_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-api.XXXXXX")"
+    curl_config="$request_dir/request.curl"
+    trap 'rm -rf -- "$request_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cat >"$curl_config" <<EOF
+fail
+silent
+show-error
+header = "X-Consul-Token: $consul_token"
+EOF
+    curl_direct --proto '=http' --config "$curl_config" --output "$output_file" \
+      "http://127.0.0.1:8500$path"
+  )
+}
+
+function ensure_consul_policy {
+  local -r consul_token_file="$1"
+  local -r policy_name="$2"
+  local -r policy_file="$3"
+
+  if CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy read \
+    -name="$policy_name" >/dev/null 2>&1; then
+    CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy update \
+      -name "$policy_name" -rules "@$policy_file" >/dev/null
+  elif ! CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy create \
+    -name "$policy_name" -rules "@$policy_file" >/dev/null 2>&1; then
+    # Another server may have won the create race. Re-read and update the exact
+    # document; any unrelated error remains fatal.
+    CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy read \
+      -name="$policy_name" >/dev/null
+    CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy update \
+      -name "$policy_name" -rules "@$policy_file" >/dev/null
+  fi
+}
+
+function consul_api_delete {
+  (
+    local -r consul_token="$1"
+    local -r path="$2"
+    local request_dir
+    local curl_config
+
+    umask 077
+    request_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-api.XXXXXX")"
+    curl_config="$request_dir/request.curl"
+    trap 'rm -rf -- "$request_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cat >"$curl_config" <<EOF
+fail
+silent
+show-error
+header = "X-Consul-Token: $consul_token"
+EOF
+    curl_direct --proto '=http' --config "$curl_config" --request DELETE \
+      "http://127.0.0.1:8500$path" >/dev/null
+  )
+}
+
+function reconcile_consul_token {
+  (
+    local management_token="$1"
+    local desired_token="$2"
+    local description="$3"
+    local lineage_key="$4"
+    local version_resource="$5"
+    shift 5
+    local -a policy_names=("$@")
+    local work_dir
+    local desired_token_file
+    local token_payload
+    local token_self
+    local tokens_list
+    local policies_json
+    local current_accessor
+    local lineage_payload
+    local prior_lineage
+    local superseded_accessors_json
+    local revoked_accessors_json='[]'
+    local -a superseded_accessors=()
+
+    [[ "${#policy_names[@]}" -gt 0 ]] || return 1
+    [[ "$lineage_key" =~ ^[a-z0-9-]+$ ]] || return 1
+    [[ "$version_resource" =~ /versions/[1-9][0-9]*$ ]] || return 1
+
+    umask 077
+    work_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-token-reconcile.XXXXXX")"
+    trap 'rm -rf -- "$work_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    desired_token_file="$work_dir/desired-token"
+    token_payload="$work_dir/token.json"
+    token_self="$work_dir/token-self.json"
+    tokens_list="$work_dir/tokens.json"
+    policies_json="$work_dir/policies.json"
+    lineage_payload="$work_dir/lineage.json"
+    prior_lineage="$work_dir/prior-lineage.json"
+    printf '%s' "$desired_token" >"$desired_token_file"
+    printf '%s\n' "${policy_names[@]}" | jq -R '{Name:.}' | jq -s 'sort_by(.Name)' >"$policies_json"
+
+    if consul_api_get_file "$desired_token" '/v1/acl/token/self' "$token_self" 2>/dev/null; then
+      current_accessor="$(jq -er '.AccessorID | select(type == "string" and length > 0)' "$token_self")"
+      jq -n \
+        --arg accessor "$current_accessor" \
+        --arg description "$description" \
+        --rawfile token "$desired_token_file" \
+        --slurpfile policies "$policies_json" \
+        '{AccessorID:$accessor,SecretID:$token,Description:$description,Policies:$policies[0]}' \
+        >"$token_payload"
+      consul_api_put_file "$management_token" "/v1/acl/token/$current_accessor" "$token_payload"
+    else
+      jq -n \
+        --arg description "$description" \
+        --rawfile token "$desired_token_file" \
+        --slurpfile policies "$policies_json" \
+        '{SecretID:$token,Description:$description,Policies:$policies[0]}' \
+        >"$token_payload"
+      if ! consul_api_put_file "$management_token" '/v1/acl/token' "$token_payload"; then
+        sleep 1
+      fi
+    fi
+
+    consul_api_get_file "$desired_token" '/v1/acl/token/self' "$token_self"
+    jq -e --slurpfile expected "$policies_json" '
+      ([.Policies[]? | {Name}] | sort_by(.Name)) == $expected[0]
+    ' "$token_self" >/dev/null
+    current_accessor="$(jq -er '.AccessorID | select(type == "string" and length > 0)' "$token_self")"
+
+    consul_api_get_file "$management_token" '/v1/acl/tokens' "$tokens_list"
+    superseded_accessors=()
+    while IFS= read -r old_accessor; do
+      [[ -n "$old_accessor" ]] && superseded_accessors+=("$old_accessor")
+    done < <(
+      jq -r \
+        --arg description "$description" \
+        --arg current "$current_accessor" '
+          .[]?
+          | select(.Description == $description and .AccessorID != $current)
+          | .AccessorID
+          | select(type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+        ' "$tokens_list"
+    )
+    # Registration and retirement are deliberately separate rollout phases.
+    # Existing API/data hosts and Nomad allocations may still use the previous
+    # SecretID until their own exact stage converges. Record those accessors for
+    # an explicit post-client cleanup; never revoke them during server boot.
+    superseded_accessors_json="$(jq -n --args '$ARGS.positional' -- "${superseded_accessors[@]}")"
+    if consul_api_get_file "$management_token" "/v1/kv/e2b/acl-lineage/$lineage_key?raw" "$prior_lineage" 2>/dev/null \
+      && jq -e '
+        (.superseded_accessors | type) == "array"
+        and all(.superseded_accessors[]; type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+        and (.revoked_accessors | type) == "array"
+        and all(.revoked_accessors[]; type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+      ' "$prior_lineage" >/dev/null; then
+      revoked_accessors_json="$(jq -c '.revoked_accessors | unique | sort' "$prior_lineage")"
+      superseded_accessors_json="$(
+        jq -cn \
+          --argjson discovered "$superseded_accessors_json" \
+          --argjson prior "$(jq -c '.superseded_accessors' "$prior_lineage")" \
+          --argjson revoked "$revoked_accessors_json" \
+          --arg current "$current_accessor" '
+            (($discovered + $prior) - $revoked)
+            | map(select(. != $current))
+            | unique
+            | sort
+          '
+      )"
+    fi
+    jq -n \
+      --arg current_accessor "$current_accessor" \
+      --arg version_resource "$version_resource" \
+      --argjson superseded_accessors "$superseded_accessors_json" \
+      --argjson revoked_accessors "$revoked_accessors_json" \
+      '{current_accessor:$current_accessor,version_resource:$version_resource,superseded_accessors:$superseded_accessors,revoked_accessors:$revoked_accessors}' \
+      >"$lineage_payload"
+    consul_api_put_file "$management_token" "/v1/kv/e2b/acl-lineage/$lineage_key" "$lineage_payload"
+  )
+}
+
+function retire_consul_token_lineage {
+  (
+    local management_token="$1"
+    local desired_token="$2"
+    local description="$3"
+    local lineage_key="$4"
+    local version_resource="$5"
+    local work_dir
+    local token_self
+    local tokens_list
+    local lineage_payload
+    local current_accessor
+    local old_accessor
+    local revoked_accessors_json
+    local -a superseded_accessors=()
+
+    [[ "$lineage_key" =~ ^[a-z0-9-]+$ ]] || return 1
+    [[ "$version_resource" =~ /versions/[1-9][0-9]*$ ]] || return 1
+
+    umask 077
+    work_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-token-retire.XXXXXX")"
+    trap 'rm -rf -- "$work_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    token_self="$work_dir/token-self.json"
+    tokens_list="$work_dir/tokens.json"
+    lineage_payload="$work_dir/lineage.json"
+
+    consul_api_get_file "$desired_token" '/v1/acl/token/self' "$token_self"
+    current_accessor="$(jq -er '.AccessorID | select(type == "string" and test("^[0-9A-Fa-f-]{36}$"))' "$token_self")"
+    consul_api_get_file "$management_token" "/v1/kv/e2b/acl-lineage/$lineage_key?raw" "$lineage_payload"
+    jq -e \
+      --arg current "$current_accessor" \
+      --arg version "$version_resource" '
+        .current_accessor == $current
+        and .version_resource == $version
+        and (.superseded_accessors | type) == "array"
+        and all(.superseded_accessors[]; type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+        and (.revoked_accessors | type) == "array"
+        and all(.revoked_accessors[]; type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+      ' "$lineage_payload" >/dev/null
+
+    while IFS= read -r old_accessor; do
+      [[ -n "$old_accessor" ]] && superseded_accessors+=("$old_accessor")
+    done < <(jq -r '.superseded_accessors[]?' "$lineage_payload")
+
+    consul_api_get_file "$management_token" '/v1/acl/tokens' "$tokens_list"
+    for old_accessor in "${superseded_accessors[@]}"; do
+      jq -e \
+        --arg accessor "$old_accessor" \
+        --arg description "$description" \
+        --arg current "$current_accessor" '
+          any(.[]?;
+            .AccessorID == $accessor
+            and .AccessorID != $current
+            and .Description == $description
+          )
+        ' "$tokens_list" >/dev/null
+      consul_api_delete "$management_token" "/v1/acl/token/$old_accessor"
+      if consul_api_get_file "$management_token" "/v1/acl/token/$old_accessor" "$work_dir/revoked.json" 2>/dev/null; then
+        log_error "Superseded Consul token remained valid after explicit retirement"
+        return 1
+      fi
+    done
+
+    revoked_accessors_json="$(
+      jq -c \
+        --argjson newly_revoked "$(jq -n --args '$ARGS.positional' -- "${superseded_accessors[@]}")" \
+        '((.revoked_accessors // []) + $newly_revoked) | unique | sort' \
+        "$lineage_payload"
+    )"
+    jq -n \
+      --arg current_accessor "$current_accessor" \
+      --arg version_resource "$version_resource" \
+      --argjson revoked_accessors "$revoked_accessors_json" \
+      '{current_accessor:$current_accessor,version_resource:$version_resource,superseded_accessors:[],revoked_accessors:$revoked_accessors}' \
+      >"$lineage_payload"
+    consul_api_put_file "$management_token" "/v1/kv/e2b/acl-lineage/$lineage_key" "$lineage_payload"
+    log_info "Explicitly retired superseded Consul token lineage: $lineage_key"
   )
 }
 
@@ -162,10 +449,17 @@ function get_instance_region {
   get_instance_metadata_value "instance/zone" | cut -d'/' -f4 | awk -F'-' '{ print $1"-"$2 }'
 }
 
-# Get the ID of the current Compute Instance
+# Get the name of the current Compute Instance
 function get_instance_name {
   log_info "Looking up current Compute Instance name"
   get_instance_metadata_value "instance/name"
+}
+
+# Use the immutable numeric GCE instance ID for Consul node identity. Hostnames
+# can be reused across template replacements and must not alias prior agents.
+function get_instance_id {
+  log_info "Looking up current Compute Instance ID"
+  get_instance_metadata_value "instance/id"
 }
 
 # Get the IP Address of the current Compute Instance
@@ -192,7 +486,7 @@ function split_by_lines {
 
 function generate_consul_config {
   local -r server="${1}"
-  local -r consul_token="${2}"
+  local -r dns_request_token="${2}"
   local -r config_dir="${3}"
   local -r user="${4}"
   local -r cluster_tag_name="${5}"
@@ -212,9 +506,10 @@ function generate_consul_config {
   local -r redundancy_zone_tag="${19}"
   local -r disable_upgrade_migration="${20}"
   local -r upgrade_version_tag=${21}
+  local -r agent_token="${22}"
   local -r config_path="$config_dir/$CONSUL_CONFIG_FILE"
 
-  shift 20
+  shift 22
   local -ar recursors=("$@")
 
   local instance_id=""
@@ -225,6 +520,7 @@ function generate_consul_config {
   local ui="false"
 
   instance_ip_address=$(get_instance_ip_address)
+  instance_id=$(get_instance_id)
   instance_name=$(get_instance_name)
   instance_region=$(get_instance_region)
   project_id=$(get_instance_project_id)
@@ -281,6 +577,19 @@ EOF
     gossip_encryption_configuration="\"encrypt\": \"$gossip_encryption_key\","
   fi
 
+  # Consul's internal anti-entropy loop needs the API/data Nomad client-sync
+  # token to deregister services on allocation shutdown. Use the dedicated
+  # agent slot, never default: unauthenticated HTTP requests must continue to
+  # receive the deny-default anonymous identity.
+  local agent_token_configuration=""
+  if [[ -n "$agent_token" ]]; then
+    agent_token_configuration=$(cat <<EOF
+,
+      "agent": "$agent_token"
+EOF
+    )
+  fi
+
   local rpc_encryption_configuration=""
   if [[ "$enable_rpc_encryption" == "true" && -n "$ca_path" && -n "$cert_file_path" && -n "$key_file_path" ]]; then
     log_info "Creating RPC encryption configuration"
@@ -309,7 +618,7 @@ EOF
     "default_policy": "deny",
     "enable_token_persistence": true,
     "tokens": {
-      "default": "$consul_token"
+      "dns": "$dns_request_token"$agent_token_configuration
     }
   },
   "telemetry": {
@@ -322,7 +631,13 @@ EOF
   "advertise_addr": "$instance_ip_address",
   "bind_addr": "$instance_ip_address",
   $bootstrap_expect
-  "client_addr": "0.0.0.0",
+  "client_addr": "127.0.0.1",
+  "addresses": {
+    "dns": "0.0.0.0",
+    "http": "127.0.0.1",
+    "https": "127.0.0.1",
+    "grpc": "127.0.0.1"
+  },
   "datacenter": "$datacenter",
   "node_name": "$instance_id",
   "leave_on_terminate": true,
@@ -426,7 +741,8 @@ function bootstrap {
   log_info "Instance IP Address: $instance_ip_address"
 
   while true; do
-    consul_leader_addr=$(curl http://localhost:8500/v1/status/leader 2>/dev/null || true)
+    consul_leader_addr=$(curl_direct --proto '=http' \
+      http://localhost:8500/v1/status/leader 2>/dev/null || true)
     log_info "Consul leader address: $consul_leader_addr"
 
     if [[ "$consul_leader_addr" == "\"$instance_ip_address:8300\"" ]]; then
@@ -448,6 +764,12 @@ function bootstrap {
       bootstrap_status=$?
       set -e
       if [[ "$bootstrap_status" -ne 0 ]]; then
+        if [[ "$bootstrap_output" == *"ACL bootstrap no longer allowed"* || "$bootstrap_output" == *"ACL bootstrap already"* ]]; then
+          unset bootstrap_output
+          log_info "Consul ACLs were already bootstrapped"
+          break
+        fi
+        unset bootstrap_output
         log_error "Consul ACL bootstrap failed"
         return "$bootstrap_status"
       fi
@@ -469,17 +791,78 @@ function bootstrap {
   )
 }
 
+function setup_management_access {
+  (
+    local legacy_token="$1"
+    local candidate_token="$2"
+    local candidate_token_version="$3"
+    local work_dir
+    local token_self
+    local candidate_self
+    local lineage_payload
+    local legacy_accessor=""
+    local candidate_accessor
+    local management_token="$legacy_token"
+
+    umask 077
+    work_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-management-bootstrap.XXXXXX")"
+    trap 'rm -rf -- "$work_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    token_self="$work_dir/token-self.json"
+    candidate_self="$work_dir/candidate-self.json"
+    lineage_payload="$work_dir/lineage.json"
+
+    if consul_api_get_file "$legacy_token" '/v1/acl/token/self' "$token_self" 2>/dev/null; then
+      legacy_accessor="$(jq -er '.AccessorID | select(type == "string" and test("^[0-9A-Fa-f-]{36}$"))' "$token_self")"
+    fi
+
+    # After the old SecretID is revoked, reboot remains safe: a proven
+    # candidate global-management token can reconcile itself and all leaf
+    # identities without depending on the retired credential.
+    if consul_api_get_file "$candidate_token" '/v1/acl/token/self' "$token_self" 2>/dev/null \
+      && jq -e '([.Policies[]?.Name] | sort) == ["global-management"]' "$token_self" >/dev/null; then
+      management_token="$candidate_token"
+    fi
+
+    reconcile_consul_token \
+      "$management_token" "$candidate_token" \
+      "E2B Consul promoted management token" "management" \
+      "$candidate_token_version" "global-management"
+
+    # The pre-existing bootstrap token has a different description from the
+    # promoted token, so generic same-description rotation cannot discover it.
+    # Record it explicitly for the post-client retirement phase without
+    # revoking it during the server rollout.
+    if [[ -n "$legacy_accessor" ]]; then
+      consul_api_get_file "$candidate_token" '/v1/acl/token/self' "$candidate_self"
+      candidate_accessor="$(jq -er '.AccessorID | select(type == "string" and test("^[0-9A-Fa-f-]{36}$"))' "$candidate_self")"
+      if [[ "$legacy_accessor" != "$candidate_accessor" ]]; then
+        consul_api_get_file "$candidate_token" '/v1/kv/e2b/acl-lineage/management?raw' "$lineage_payload"
+        jq \
+          --arg legacy "$legacy_accessor" '
+            .superseded_accessors = ((.superseded_accessors + [$legacy]) - .revoked_accessors | unique | sort)
+          ' "$lineage_payload" >"$work_dir/lineage-updated.json"
+        consul_api_put_file "$candidate_token" '/v1/kv/e2b/acl-lineage/management' "$work_dir/lineage-updated.json"
+      fi
+    fi
+    log_info "Consul candidate management token registered and proven"
+  )
+}
+
 function setup_dns_resolving {
   (
     local consul_token="$1"
     local dns_request_token="$2"
+    local dns_request_token_version="$3"
+    local nomad_client_token="$4"
+    local nomad_client_token_version="$5"
+    local worker_autoscaler_token="$6"
+    local worker_autoscaler_token_version="$7"
     local work_dir
     local dns_policy
     local register_policy
+    local worker_autoscaler_policy
     local consul_token_file
-    local dns_token_file
-    local token_payload
-    local agent_payload
 
     umask 077
     work_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-dns-bootstrap.XXXXXX")"
@@ -487,22 +870,16 @@ function setup_dns_resolving {
     trap 'exit 1' HUP INT TERM
     dns_policy="$work_dir/dns-request-policy.hcl"
     register_policy="$work_dir/register-service-policy.hcl"
+    worker_autoscaler_policy="$work_dir/worker-autoscaler-policy.hcl"
     consul_token_file="$work_dir/consul-token"
-    dns_token_file="$work_dir/dns-token"
     printf '%s' "$consul_token" >"$consul_token_file"
-    printf '%s' "$dns_request_token" >"$dns_token_file"
 
-  until CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul info > /dev/null 2>&1;
-  do
-    log_info "Waiting for Consul to start"
-    sleep 1
-  done
+    until CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul info >/dev/null 2>&1; do
+      log_info "Waiting for Consul to start"
+      sleep 1
+    done
 
-  if CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy read -name="dns-request-policy" >/dev/null 2>&1; then
-    log_info "DNS Request Policy already exists"
-  else
     # Based on https://developer.hashicorp.com/consul/tutorials/security/access-control-setup-production#token-for-dns
-    # Token is created on the leader node, so there's no problem with duplication
     cat <<EOF >"$dns_policy"
 node_prefix "" {
   policy = "read"
@@ -513,22 +890,43 @@ service_prefix "" {
 EOF
 
     cat <<EOF >"$register_policy"
+agent_prefix "" {
+  policy = "read"
+}
+node_prefix "" {
+  policy = "read"
+}
 service_prefix "" {
   policy = "write"
 }
 EOF
-      CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy create -name "dns-request-policy" -rules "@$dns_policy"
-      CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy create -name "register-service-policy" -rules "@$register_policy"
-      token_payload="$work_dir/token.json"
-      jq -n --rawfile token "$dns_token_file" '{SecretID:$token,Description:"Client Token",Policies:[{Name:"dns-request-policy"},{Name:"register-service-policy"}]}' >"$token_payload"
-      consul_api_put_file "$consul_token" '/v1/acl/token' "$token_payload"
-  fi
 
+    cat <<EOF >"$worker_autoscaler_policy"
+key_prefix "service/monad-worker-autoscaler/" {
+  policy = "write"
+}
+session_prefix "" {
+  policy = "write"
+}
+EOF
 
-  agent_payload="$work_dir/agent.json"
-  jq -n --rawfile token "$dns_token_file" '{Token:$token}' >"$agent_payload"
-  consul_api_put_file "$consul_token" '/v1/agent/token/default' "$agent_payload"
-  log_info "Client token set"
+    ensure_consul_policy "$consul_token_file" "dns-request-policy" "$dns_policy"
+    ensure_consul_policy "$consul_token_file" "register-service-policy" "$register_policy"
+    ensure_consul_policy "$consul_token_file" "worker-autoscaler-policy" "$worker_autoscaler_policy"
+
+    reconcile_consul_token \
+      "$consul_token" "$dns_request_token" \
+      "E2B Consul DNS token" "dns" \
+      "$dns_request_token_version" "dns-request-policy"
+    reconcile_consul_token \
+      "$consul_token" "$nomad_client_token" \
+      "E2B Consul Nomad-client sync token" "nomad-client-sync" \
+      "$nomad_client_token_version" "register-service-policy"
+    reconcile_consul_token \
+      "$consul_token" "$worker_autoscaler_token" \
+      "E2B Consul worker-autoscaler token" "worker-autoscaler" \
+      "$worker_autoscaler_token_version" "worker-autoscaler-policy"
+    log_info "Consul DNS, Nomad-client sync, and worker-autoscaler tokens reconciled"
   )
 }
 
@@ -580,6 +978,16 @@ function run {
   local server_stabilization_time="$DEFAULT_AUTOPILOT_SERVER_STABILIZATION_TIME"
   local redundancy_zone_tag="$DEFAULT_AUTOPILOT_REDUNDANCY_ZONE_TAG"
   local disable_upgrade_migration="$DEFAULT_AUTOPILOT_DISABLE_UPGRADE_MIGRATION"
+  local consul_token=""
+  local consul_token_candidate=""
+  local consul_token_candidate_version=""
+  local dns_request_token=""
+  local dns_request_token_version=""
+  local nomad_client_token=""
+  local nomad_client_token_version=""
+  local worker_autoscaler_token=""
+  local worker_autoscaler_token_version=""
+  local consul_agent_token=""
 
   while [[ $# -gt 0 ]]; do
     local key="$1"
@@ -594,6 +1002,16 @@ function run {
     --consul-token-file)
       read_secret_file "$key" "$2"
       consul_token="$REPLY"
+      shift
+      ;;
+    --consul-token-candidate-file)
+      read_secret_file "$key" "$2"
+      consul_token_candidate="$REPLY"
+      shift
+      ;;
+    --consul-token-candidate-version)
+      assert_not_empty "$key" "$2"
+      consul_token_candidate_version="$2"
       shift
       ;;
     --config-dir)
@@ -683,6 +1101,31 @@ function run {
       dns_request_token="$REPLY"
       shift
       ;;
+    --dns-request-token-version)
+      assert_not_empty "$key" "$2"
+      dns_request_token_version="$2"
+      shift
+      ;;
+    --nomad-client-token-file)
+      read_secret_file "$key" "$2"
+      nomad_client_token="$REPLY"
+      shift
+      ;;
+    --nomad-client-token-version)
+      assert_not_empty "$key" "$2"
+      nomad_client_token_version="$2"
+      shift
+      ;;
+    --worker-autoscaler-token-file)
+      read_secret_file "$key" "$2"
+      worker_autoscaler_token="$REPLY"
+      shift
+      ;;
+    --worker-autoscaler-token-version)
+      assert_not_empty "$key" "$2"
+      worker_autoscaler_token_version="$2"
+      shift
+      ;;
     --enable-rpc-encryption)
       enable_rpc_encryption="true"
       ;;
@@ -736,6 +1179,12 @@ function run {
     exit 1
   fi
 
+  assert_not_empty "--dns-request-token-file" "$dns_request_token"
+  if [[ "$client" == "true" ]]; then
+    assert_not_empty "--nomad-client-token-file" "$nomad_client_token"
+    consul_agent_token="$nomad_client_token"
+  fi
+
   assert_is_installed "systemctl"
   assert_is_installed "curl"
   assert_is_installed "jq"
@@ -775,7 +1224,7 @@ function run {
     fi
 
     generate_consul_config "$server" \
-      "$consul_token" \
+      "$dns_request_token" \
       "$config_dir" \
       "$user" \
       "$cluster_tag_name" \
@@ -795,18 +1244,29 @@ function run {
       "$redundancy_zone_tag" \
       "$disable_upgrade_migration" \
       "$upgrade_version_tag" \
+      "$consul_agent_token" \
       "${recursors[@]}"
   fi
 
   generate_systemd_config "$SYSTEMD_CONFIG_PATH" "$config_dir" "$data_dir" "$systemd_stdout" "$systemd_stderr" "$bin_dir" "$user" "${environment[@]}"
   start_consul
 
-  if [[ "$client" == "true" ]]; then
-    setup_dns_resolving "$consul_token" "$dns_request_token"
-  fi
-
   if [[ "$server" == "true" ]]; then
     bootstrap "$consul_token"
+    assert_not_empty "--consul-token-candidate-file" "$consul_token_candidate"
+    assert_not_empty "--consul-token-candidate-version" "$consul_token_candidate_version"
+    assert_not_empty "--nomad-client-token-file" "$nomad_client_token"
+    assert_not_empty "--dns-request-token-version" "$dns_request_token_version"
+    assert_not_empty "--nomad-client-token-version" "$nomad_client_token_version"
+    assert_not_empty "--worker-autoscaler-token-file" "$worker_autoscaler_token"
+    assert_not_empty "--worker-autoscaler-token-version" "$worker_autoscaler_token_version"
+    setup_management_access \
+      "$consul_token" "$consul_token_candidate" "$consul_token_candidate_version"
+    setup_dns_resolving \
+      "$consul_token_candidate" \
+      "$dns_request_token" "$dns_request_token_version" \
+      "$nomad_client_token" "$nomad_client_token_version" \
+      "$worker_autoscaler_token" "$worker_autoscaler_token_version"
   fi
 }
 

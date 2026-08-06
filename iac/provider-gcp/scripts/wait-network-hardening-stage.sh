@@ -6,6 +6,7 @@ region="${GCP_REGION:?GCP_REGION is required}"
 zone="${GCP_ZONE:?GCP_ZONE is required}"
 prefix="${PREFIX:?PREFIX is required}"
 stage="${NETWORK_HARDENING_ROLLOUT_STAGE:?NETWORK_HARDENING_ROLLOUT_STAGE is required}"
+nomad_token_secret_version="${NOMAD_TOKEN_SECRET_VERSION:?NOMAD_TOKEN_SECRET_VERSION is required}"
 domain_name="${DOMAIN_NAME:-}"
 gcloud_bin="${GCLOUD_BIN:-gcloud}"
 curl_bin="${CURL_BIN:-curl}"
@@ -17,7 +18,7 @@ case "${stage}" in
     printf 'Network-hardening rollout is disabled; no convergence wait is required.\n'
     exit 0
     ;;
-  network | server | api | worker | build) ;;
+  network | server-safety | server | server-health | api | worker | build) ;;
   *)
     printf 'Unknown network-hardening convergence stage: %s\n' "${stage}" >&2
     exit 2
@@ -66,7 +67,21 @@ legacy_allow_firewall="${prefix}orch-internal-remote-connection-firewall-ingress
 nomad_backend="${prefix}backend-nomad"
 api_backends=("${prefix}backend-api" "${prefix}h2c-api")
 nomad_secret="${prefix}nomad-secret-id"
+nomad_secret_version_prefix="projects/${project_id}/secrets/${nomad_secret}/versions/"
+[[ "${nomad_token_secret_version}" == "${nomad_secret_version_prefix}"* ]] || {
+  printf 'Nomad waiter token reference must target the exact project and secret: %s\n' \
+    "${nomad_token_secret_version}" >&2
+  exit 2
+}
+nomad_token_version="${nomad_token_secret_version#"${nomad_secret_version_prefix}"}"
+[[ "${nomad_token_version}" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'Nomad waiter token reference must use an immutable numeric version: %s\n' \
+    "${nomad_token_secret_version}" >&2
+  exit 2
+}
 nomad_host="nomad.${domain_name}"
+legacy_server_health_check="${prefix}orch-server-nomad-check"
+strict_server_health_check="${prefix}orch-server-voter-check"
 last_check="starting"
 group_instances='[]'
 stage_instances='[]'
@@ -225,6 +240,70 @@ managed_group_ready() {
     '[.[] | . + {rolloutGroup: $group}]' <<<"${instances}")" || return 1
 }
 
+health_check_ready() {
+  local name="$1"
+  local expected_port="$2"
+  local expected_path="$3"
+  local document
+
+  last_check="health check ${name}"
+  document="$(
+    "${gcloud_bin}" compute health-checks describe "${name}" \
+      --project="${project_id}" \
+      --format=json 2>/dev/null
+  )" || return 1
+
+  jq -e \
+    --argjson port "${expected_port}" \
+    --arg path "${expected_path}" '
+      .type == "HTTP"
+      and .checkIntervalSec == 5
+      and .timeoutSec == 5
+      and .healthyThreshold == 2
+      and .unhealthyThreshold == 10
+      and .httpHealthCheck.port == $port
+      and .httpHealthCheck.requestPath == $path
+    ' <<<"${document}" >/dev/null
+}
+
+server_mig_policy_ready() {
+  local expected_health_mode="$1"
+  local expected_health_check
+  local document
+
+  case "${expected_health_mode}" in
+    legacy) expected_health_check="${legacy_server_health_check}" ;;
+    strict) expected_health_check="${strict_server_health_check}" ;;
+    *) return 2 ;;
+  esac
+
+  last_check="server MIG safety policy with ${expected_health_mode} health"
+  document="$(
+    "${gcloud_bin}" compute instance-groups managed describe \
+      "${prefix}orch-server-rig" \
+      --region="${region}" \
+      --project="${project_id}" \
+      --format=json 2>/dev/null
+  )" || return 1
+
+  jq -e \
+    --arg health_suffix "/global/healthChecks/${expected_health_check}" '
+      .status.isStable == true
+      and .status.versionTarget.isReached == true
+      and .updatePolicy.type == "PROACTIVE"
+      and .updatePolicy.minimalAction == "REPLACE"
+      and .updatePolicy.replacementMethod == "SUBSTITUTE"
+      and .updatePolicy.maxSurge.fixed == 1
+      and .updatePolicy.maxUnavailable.fixed == 0
+      and .instanceLifecyclePolicy.defaultActionOnFailure == "REPAIR"
+      and .instanceLifecyclePolicy.forceUpdateOnRepair == "NO"
+      and .instanceLifecyclePolicy.onFailedHealthCheck == "DO_NOTHING"
+      and (.autoHealingPolicies | length) == 1
+      and (.autoHealingPolicies[0].healthCheck | endswith($health_suffix))
+      and .autoHealingPolicies[0].initialDelaySec == 120
+    ' <<<"${document}" >/dev/null
+}
+
 append_group_instances() {
   stage_instances="$(jq -cn \
     --argjson current "${stage_instances}" \
@@ -297,7 +376,7 @@ load_nomad_token() {
 
   last_check="Nomad ACL token"
   nomad_token="$(
-    "${gcloud_bin}" secrets versions access latest \
+    "${gcloud_bin}" secrets versions access "${nomad_token_version}" \
       --secret="${nomad_secret}" \
       --project="${project_id}" 2>/dev/null
   )" || return 1
@@ -317,7 +396,12 @@ nomad_request() {
       'max-time = 10'
     printf 'header = "X-Nomad-Token: %s"\n' "${nomad_token}"
     printf 'url = "https://%s%s"\n' "${nomad_host}" "${path}"
-  } | "${curl_bin}" --config -
+  } | env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    "${curl_bin}" --disable --noproxy '*' --proto '=https' --config -
 }
 
 nomad_servers_ready() {
@@ -381,7 +465,12 @@ nomad_clients_ready() {
 
 public_api_ready() {
   last_check="public API load balancer"
-  "${curl_bin}" \
+  env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    "${curl_bin}" --disable --noproxy '*' --proto '=https' \
     --fail \
     --silent \
     --show-error \
@@ -424,7 +513,7 @@ iap_os_login_ready() {
     [[ "${instance_zone}" == "${region}-"* ]] || return 1
     [[ "${instance_id}" =~ ^[0-9]+$ ]] || return 1
     last_check="IAP/OS Login ${instance_name}:${instance_id}"
-    remote_command="set -eu; instance_id=\$(curl -fsS --connect-timeout 5 --max-time 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id); os_login=\$(curl -fsS --connect-timeout 5 --max-time 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/enable-oslogin); test \"\$instance_id\" = '${instance_id}'; test \"\$os_login\" = 'TRUE'"
+    remote_command="set -eu; unset ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; instance_id=\$(curl --disable --noproxy '*' --proto '=http' -fsS --connect-timeout 5 --max-time 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id); os_login=\$(curl --disable --noproxy '*' --proto '=http' -fsS --connect-timeout 5 --max-time 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/enable-oslogin); test \"\$instance_id\" = '${instance_id}'; test \"\$os_login\" = 'TRUE'"
     "${gcloud_bin}" compute ssh "${instance_name}" \
       --project="${project_id}" \
       --zone="${instance_zone}" \
@@ -443,7 +532,7 @@ iap_os_login_ready() {
 collect_stage_instances() {
   stage_instances='[]'
   case "${stage}" in
-    server)
+    server-safety | server | server-health)
       managed_group_ready "${prefix}orch-server-rig" --region "${region}" || return 1
       append_group_instances || return 1
       ;;
@@ -482,7 +571,22 @@ stage_ready() {
   evidence_identity_sha256="${stage_identity_sha256}"
 
   case "${stage}" in
+    server-safety)
+      health_check_ready "${legacy_server_health_check}" 4646 "/v1/agent/health" || return 1
+      health_check_ready "${strict_server_health_check}" 50001 "/healthz" || return 1
+      server_mig_policy_ready legacy || return 1
+      nomad_servers_ready "${stage_instances}" || return 1
+      ;;
     server)
+      health_check_ready "${legacy_server_health_check}" 4646 "/v1/agent/health" || return 1
+      health_check_ready "${strict_server_health_check}" 50001 "/healthz" || return 1
+      server_mig_policy_ready legacy || return 1
+      nomad_servers_ready "${stage_instances}" || return 1
+      ;;
+    server-health)
+      health_check_ready "${legacy_server_health_check}" 4646 "/v1/agent/health" || return 1
+      health_check_ready "${strict_server_health_check}" 50001 "/healthz" || return 1
+      server_mig_policy_ready strict || return 1
       nomad_servers_ready "${stage_instances}" || return 1
       ;;
     api)
@@ -496,7 +600,9 @@ stage_ready() {
       nomad_clients_ready "${stage_instances}" || return 1
       ;;
   esac
-  iap_os_login_ready "${stage_instances}" || return 1
+  if [[ "${stage}" != "server-safety" ]]; then
+    iap_os_login_ready "${stage_instances}" || return 1
+  fi
 
   # Re-read the stable MIG inventory after all remote checks. If a replacement
   # changed while evidence was being gathered, discard it and retry every

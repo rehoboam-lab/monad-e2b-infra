@@ -24,7 +24,6 @@ variables {
   nomad_server_tag_name              = "monad-nomad-server"
   google_service_account_email       = "worker@monad-code.iam.gserviceaccount.com"
   nomad_port                         = 4646
-  nomad_acl_token_secret_name        = "projects/test/secrets/nomad"
   node_pool                          = "default"
   docker_contexts_bucket_name        = "docker-contexts"
   cluster_setup_bucket_name          = "cluster-setup"
@@ -43,12 +42,12 @@ variables {
   environment                        = "dev"
   labels                             = {}
   file_hash = {
-    "scripts/configure-docker-gcp.sh" = "abcde"
-    "scripts/fetch-gcp-secret.sh"     = "abcde"
-    "scripts/run-consul.sh"           = "abcde"
-    "scripts/run-nomad.sh"            = "abcde"
+    "scripts/configure-docker-gcp.sh"     = "abcde"
+    "scripts/fetch-gcp-secret.sh"         = "abcde"
+    "scripts/refresh-consul-resolvers.sh" = "abcde"
+    "scripts/run-consul.sh"               = "abcde"
+    "scripts/run-nomad.sh"                = "abcde"
   }
-  set_orchestrator_version_metadata  = true
   persistent_volume_types            = {}
   workload_autoscaler_shadow_enabled = true
 }

@@ -286,9 +286,7 @@ bash -c '
   orchestrator_job_version=""
   token_dir="$(mktemp -d)"
   trap '\''rm -rf -- "$token_dir"'\'' EXIT
-  printf "%s" test-consul >"$token_dir/consul"
-  chmod 0600 "$token_dir/consul"
-  run --server --num-servers 3 --consul-token-file "$token_dir/consul" --nomad-token-file /run/e2b-nomad-health/token
+  run --server --num-servers 3 --nomad-server-legacy-tag-name orch --nomad-server-tag-name test-nomad-server --nomad-token-file /run/e2b-nomad-health/token
 ' bash "${run_fixture}/bin/run-nomad.sh"
 
 printf 'Nomad restart safety regression test passed.\n'

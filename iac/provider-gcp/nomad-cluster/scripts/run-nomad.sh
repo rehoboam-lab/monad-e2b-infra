@@ -27,6 +27,7 @@ function print_usage {
   echo -e "  --num-servers\t\tThe minimum number of servers to expect in the Nomad cluster. Required if --server is true."
   echo -e "  --consul-token-file\tPath to the mode-0600 file containing the Consul ACL token."
   echo -e "  --nomad-server-tag-name\tGCE network tag used to discover Nomad servers when Consul integration is disabled."
+  echo -e "  --nomad-server-legacy-tag-name\tTemporary legacy GCE tag used by a replacement server to join the pre-migration quorum."
   echo -e "  --nomad-token-file\tA root-owned mode-0600 file at the reviewed /run path containing the Nomad ACL token. Required in server mode."
   echo -e "  --config-dir\t\tThe path to the Nomad config folder. Optional. Default is the absolute path of '../config', relative to this script."
   echo -e "  --data-dir\t\tThe path to the Nomad data folder. Optional. Default is the absolute path of '../data', relative to this script."
@@ -251,6 +252,7 @@ function generate_nomad_config {
   local -r orchestrator_job_version="$8"
   local -r node_labels="$9"
   local -r nomad_server_tag_name="${10}"
+  local -r nomad_server_legacy_tag_name="${11:-}"
   local -r config_path="$config_dir/$NOMAD_CONFIG_FILE"
 
   local instance_name=""
@@ -267,12 +269,43 @@ function generate_nomad_config {
 
   local server_config=""
   if [[ "$server" == "true" ]]; then
+    local server_join_config=""
+    if [[ -n "$nomad_server_tag_name" ]]; then
+      local project_id
+      project_id=$(get_instance_project_id)
+      if [[ -n "$nomad_server_legacy_tag_name" && "$nomad_server_legacy_tag_name" != "$nomad_server_tag_name" ]]; then
+        server_join_config=$(cat <<EOF
+  server_join {
+    # The legacy tag is required only for the first surge replacement: the
+    # existing quorum predates the dedicated server tag. Keep both queries
+    # until a separately proven cleanup confirms every voter has the new tag.
+    retry_join = [
+      "provider=gce project_name=$project_id tag_value=$nomad_server_legacy_tag_name zone_pattern=$instance_region-.*",
+      "provider=gce project_name=$project_id tag_value=$nomad_server_tag_name zone_pattern=$instance_region-.*"
+    ]
+    retry_interval = "15s"
+    retry_max = 0
+  }
+EOF
+        )
+      else
+        server_join_config=$(cat <<EOF
+  server_join {
+    retry_join = ["provider=gce project_name=$project_id tag_value=$nomad_server_tag_name zone_pattern=$instance_region-.*"]
+    retry_interval = "15s"
+    retry_max = 0
+  }
+EOF
+        )
+      fi
+    fi
     server_config=$(
       cat <<EOF
 server {
   enabled = true
   bootstrap_expect = $num_servers
   heartbeat_grace = "1m"
+$server_join_config
 
   default_scheduler_config {
     memory_oversubscription_enabled = true
@@ -329,7 +362,22 @@ EOF
 consul {
   address = "127.0.0.1:8500"
   allow_unauthenticated = false
+  auto_advertise = true
+  client_auto_join = false
+  server_auto_join = false
   token = "$consul_token"
+}
+EOF
+    )
+  else
+    # Nomad enables Consul advertisement and auto-join by default even when no
+    # token is configured. Server, worker, and build roles use GCE retry_join
+    # and must not make anonymous Consul requests or leave registrations.
+    consul_config=$(cat <<EOF
+consul {
+  auto_advertise = false
+  client_auto_join = false
+  server_auto_join = false
 }
 EOF
     )
@@ -542,6 +590,7 @@ function run {
   local node_labels=""
   local orchestrator_job_version=""
   local nomad_server_tag_name=""
+  local nomad_server_legacy_tag_name=""
   local use_sudo=""
   local all_args=()
 
@@ -572,6 +621,11 @@ function run {
     --nomad-server-tag-name)
       assert_not_empty "$key" "$2"
       nomad_server_tag_name="$2"
+      shift
+      ;;
+    --nomad-server-legacy-tag-name)
+      assert_not_empty "$key" "$2"
+      nomad_server_legacy_tag_name="$2"
       shift
       ;;
     --node-pool)
@@ -606,7 +660,8 @@ function run {
 
   if [[ "$server" == "true" ]]; then
     assert_not_empty "--num-servers" "$num_servers"
-    assert_not_empty "--consul-token-file" "$consul_token"
+    assert_not_empty "--nomad-server-tag-name" "$nomad_server_tag_name"
+    assert_not_empty "--nomad-server-legacy-tag-name" "$nomad_server_legacy_tag_name"
     assert_not_empty "--nomad-token-file" "$nomad_token_file"
     nomad_token="$(read_nomad_token_file "$nomad_token_file")"
   fi
@@ -643,7 +698,7 @@ function run {
   user=$(get_owner_of_path "$config_dir")
 
   remove_legacy_node_pool_documents "$config_dir"
-  generate_nomad_config "$server" "$client" "$num_servers" "$config_dir" "$user" "$consul_token" "$node_pool" "$orchestrator_job_version" "$node_labels" "$nomad_server_tag_name"
+  generate_nomad_config "$server" "$client" "$num_servers" "$config_dir" "$user" "$consul_token" "$node_pool" "$orchestrator_job_version" "$node_labels" "$nomad_server_tag_name" "$nomad_server_legacy_tag_name"
   generate_supervisor_config "$SUPERVISOR_CONFIG_PATH" "$config_dir" "$data_dir" "$bin_dir" "$log_dir" "$user" "$use_sudo"
   start_nomad
 

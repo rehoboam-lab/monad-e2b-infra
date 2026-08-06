@@ -9,6 +9,7 @@ cloud_sql_fixture="${script_dir}/testdata/cloud-sql-workload-resources.json"
 cloud_sql_project_state="${script_dir}/testdata/cloud-sql-project-state.json"
 api_controller_identity_fixture="${script_dir}/testdata/api-controller-identity-workload-resources.json"
 role_identity_fixture="${script_dir}/testdata/role-identity-workload-resources.json"
+acl_bootstrap_fixture="${script_dir}/testdata/acl-bootstrap-workload-resources.json"
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "${test_dir}"' EXIT
 
@@ -32,6 +33,7 @@ for candidate_target in \
   }
 done
 for role_target in \
+  module.init.terraform_data.acl_bootstrap_environment_guard \
   module.init.google_service_account.nomad_server_service_account \
   module.init.google_service_account.data_node_service_account \
   module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member \
@@ -39,7 +41,9 @@ for role_target in \
   module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam \
   module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam \
   module.init.google_storage_bucket_iam_member.loki_storage_iam \
+  module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam \
   module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam \
+  module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam \
   module.init.google_project_iam_member.non_api_runtime; do
   grep -F -- "-target='${role_target}'" <<<"${prerequisite_targets}" >/dev/null || {
     printf 'Missing role-identity prerequisite target: %s\n' "${role_target}" >&2
@@ -68,7 +72,8 @@ jq -n \
   --slurpfile cloud_sql "${cloud_sql_fixture}" \
   --slurpfile cloud_sql_project "${cloud_sql_project_state}" \
   --slurpfile api_controller_identity "${api_controller_identity_fixture}" \
-  --slurpfile role_identity "${role_identity_fixture}" '
+  --slurpfile role_identity "${role_identity_fixture}" \
+  --slurpfile acl_bootstrap "${acl_bootstrap_fixture}" '
   {
     format_version: "1.2",
     terraform_version: "1.7.5",
@@ -89,7 +94,21 @@ jq -n \
       )
       + $api_controller_identity[0]
       + $role_identity[0]
+      + $acl_bootstrap[0]
       + [
+        {
+          address: "module.init.terraform_data.acl_bootstrap_environment_guard",
+          mode: "managed",
+          type: "terraform_data",
+          name: "acl_bootstrap_environment_guard",
+          provider_name: "terraform.io/builtin/terraform",
+          change: {
+            actions: ["create"],
+            before: null,
+            after: {input: "dev", output: null},
+            after_unknown: {output: true}
+          }
+        },
         {
           address: "google_artifact_registry_repository.custom_environments_repository",
           mode: "managed",
@@ -431,6 +450,16 @@ expect_failure() {
 run_assertion "${test_dir}/reviewed.json" >/dev/null
 
 jq '
+  (.resource_changes[]
+    | select(.address == "module.init.terraform_data.acl_bootstrap_environment_guard")
+    | .change.after.input) = "prod"
+' "${test_dir}/reviewed.json" >"${test_dir}/nondev-init-guard.json"
+expect_failure \
+  nondev-init-guard \
+  'module.init dev-only ACL migration guard is missing or closed' \
+  "${test_dir}/nondev-init-guard.json"
+
+jq '
   (
     .resource_changes[]
     | select(.address == "module.init.google_service_account.nomad_server_service_account")
@@ -457,12 +486,12 @@ expect_failure \
 jq '
   (
     .resource_changes[]
-    | select(.address == "module.init.google_storage_bucket_iam_member.loki_storage_iam")
+    | select(.address == "module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam")
     | .change.after.member
   ) = "serviceAccount:e2b-infra-instances@operator-canary.iam.gserviceaccount.com"
 ' "${test_dir}/reviewed.json" >"${test_dir}/loki-stays-on-worker.json"
 expect_failure \
-  loki-stays-on-worker \
+  loki-data-grant-stays-on-worker \
   "role-specific attached identities or their exact least-privilege grants drifted" \
   "${test_dir}/loki-stays-on-worker.json"
 

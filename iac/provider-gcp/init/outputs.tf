@@ -38,6 +38,32 @@ output "consul_acl_token_secret_name" {
   value       = google_secret_manager_secret.consul_acl_token.name
 }
 
+output "consul_acl_token_secret_version_name" {
+  description = "Immutable promoted Consul ACL Secret Manager version read by GCE bootstrap."
+  value       = google_secret_manager_secret_version.consul_acl_token_active.name
+}
+
+output "consul_acl_token_legacy_secret_version_name" {
+  description = "Exact prior Consul ACL Secret Manager version retained disabled for audited handoff and replay proof."
+  value       = google_secret_manager_secret_version.consul_acl_token_legacy.name
+}
+
+output "consul_acl_token_candidate_secret" {
+  description = "Candidate Consul global-management SecretID used after explicit server-side registration."
+  value       = google_secret_manager_secret_version.consul_acl_token_candidate.secret_data
+  sensitive   = true
+}
+
+output "consul_acl_token_candidate_secret_name" {
+  description = "Distinct Secret Manager resource for the candidate Consul management handoff."
+  value       = google_secret_manager_secret.consul_acl_token_candidate.name
+}
+
+output "consul_acl_token_candidate_secret_version_name" {
+  description = "Immutable Secret Manager version for the candidate Consul management handoff."
+  value       = google_secret_manager_secret_version.consul_acl_token_candidate.name
+}
+
 output "nomad_acl_token_secret" {
   value     = google_secret_manager_secret_version.nomad_acl_token_active.secret_data
   sensitive = true
@@ -47,6 +73,17 @@ output "nomad_acl_token_secret_name" {
   description = "Secret Manager resource name read by GCE bootstrap through its attached identity."
   value       = google_secret_manager_secret.nomad_acl_token.name
 }
+
+output "nomad_acl_token_secret_version_name" {
+  description = "Immutable promoted Nomad ACL Secret Manager version read by GCE bootstrap."
+  value       = google_secret_manager_secret_version.nomad_acl_token_active.name
+}
+
+output "nomad_acl_token_legacy_secret_version_name" {
+  description = "Exact prior Nomad ACL Secret Manager version retained disabled for audited retirement and replay proof."
+  value       = google_secret_manager_secret_version.nomad_acl_token_legacy.name
+}
+
 
 output "api_admin_token_secret_name" {
   value = google_secret_manager_secret_version.api_admin_token_value.secret

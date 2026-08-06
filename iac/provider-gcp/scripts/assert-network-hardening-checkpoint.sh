@@ -13,8 +13,14 @@ case "${stage}" in
   network)
     expected_checks='["control_plane_healthy","iap_tunnel_access","os_login_admin_access"]'
     ;;
+  server-safety)
+    expected_checks='["iap_tunnel_access","nomad_quorum_healthy","old_health_check_attached","os_login_admin_access","strict_health_check_unattached","surge_policy_safe"]'
+    ;;
   server)
     expected_checks='["api_load_balancer_healthy","iap_tunnel_access","nomad_quorum_healthy","os_login_admin_access","target_pool_healthy"]'
+    ;;
+  server-health)
+    expected_checks='["api_load_balancer_healthy","iap_tunnel_access","nomad_quorum_healthy","os_login_admin_access","strict_health_check_attached","target_pool_healthy"]'
     ;;
   api)
     expected_checks='["api_load_balancer_healthy","iap_tunnel_access","nomad_quorum_healthy","os_login_admin_access","target_pool_healthy"]'

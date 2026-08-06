@@ -11,7 +11,7 @@ state_prefix="${7:?state prefix is required}"
 repo_root="${8:?repository root is required}"
 
 case "${stage}" in
-  network | server | api | worker | build) ;;
+  network | server-safety | server | server-health | api | worker | build) ;;
   *)
     printf 'Invalid network-hardening recovery stage: %s\n' "${stage}" >&2
     exit 1

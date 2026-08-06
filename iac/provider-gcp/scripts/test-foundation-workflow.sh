@@ -500,23 +500,47 @@ mkdir -p \
   "${workflow_provider}/nomad-cluster/scripts"
 cp "${provider_root}/Makefile" "${workflow_provider}/Makefile"
 cp -R "${provider_root}/scripts" "${workflow_provider}/scripts"
+# This fixture exercises saved-plan atomicity and provenance. The complete
+# keyless matrix has its own tests and now includes provider integrations that
+# intentionally require the full repository tree, so replace only the copied
+# fixture target with a deterministic sentinel instead of re-running that
+# independent matrix on every fake-plan branch below.
+awk '
+  $0 == ".PHONY: keyless-runtime-check" {
+    skipping = 1
+    print ".PHONY: keyless-runtime-check"
+    print "keyless-runtime-check:"
+    print "\t@ :"
+    next
+  }
+  skipping && $0 == ".PHONY: acl-token-state-guard" {
+    skipping = 0
+  }
+  !skipping { print }
+' "${workflow_provider}/Makefile" >"${workflow_provider}/Makefile.fixture"
+mv "${workflow_provider}/Makefile.fixture" "${workflow_provider}/Makefile"
 cp \
   "${provider_root}/init/api-controller-identity.tf" \
+  "${provider_root}/init/main.tf" \
   "${provider_root}/init/outputs.tf" \
   "${workflow_provider}/init/"
 cp \
   "${provider_root}/nomad-cluster/main.tf" \
   "${provider_root}/nomad-cluster/nodepool-api.tf" \
+  "${provider_root}/nomad-cluster/nodepool-clickhouse.tf" \
   "${provider_root}/nomad-cluster/nodepool-control-server.tf" \
+  "${provider_root}/nomad-cluster/nodepool-loki.tf" \
   "${provider_root}/nomad-cluster/variables.tf" \
   "${workflow_provider}/nomad-cluster/"
 cp \
   "${provider_root}/nomad-cluster/scripts/configure-docker-gcp.sh" \
   "${provider_root}/nomad-cluster/scripts/nomad-voter-health.py" \
   "${provider_root}/nomad-cluster/scripts/fetch-gcp-secret.sh" \
+  "${provider_root}/nomad-cluster/scripts/refresh-consul-resolvers.sh" \
   "${provider_root}/nomad-cluster/scripts/run-consul.sh" \
   "${provider_root}/nomad-cluster/scripts/run-nomad.sh" \
   "${provider_root}/nomad-cluster/scripts/start-clickhouse.sh" \
+  "${provider_root}/nomad-cluster/scripts/start-client.sh" \
   "${provider_root}/nomad-cluster/scripts/start-server.sh" \
   "${workflow_provider}/nomad-cluster/scripts/"
 cp \

@@ -1,4 +1,8 @@
 job "otel-collector" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   type        = "system"
   node_pool   = "all"
 
@@ -35,8 +39,9 @@ job "otel-collector" {
     }
 
     service {
-      name = "otel-collector"
-      port = "grpc"
+      provider = "nomad"
+      name     = "otel-collector"
+      port     = "grpc"
       tags = ["grpc"]
 
       check {

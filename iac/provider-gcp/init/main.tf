@@ -87,11 +87,15 @@ resource "google_service_account" "infra_instances_service_account" {
 resource "google_service_account" "nomad_server_service_account" {
   account_id   = "${var.prefix}nomad-server"
   display_name = "Nomad and Consul Server Service Account"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "google_service_account" "data_node_service_account" {
   account_id   = "${var.prefix}data-node"
   display_name = "Loki and ClickHouse Data Node Service Account"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 # Let the attached identity sign only as itself. This is required for GCS
@@ -132,7 +136,10 @@ resource "google_artifact_registry_repository_iam_member" "data_node_orchestrati
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.data_node_service_account.email}"
 
-  depends_on = [time_sleep.artifact_registry_api_wait_90_seconds]
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    time_sleep.artifact_registry_api_wait_90_seconds,
+  ]
 }
 
 resource "google_artifact_registry_repository" "core" {
@@ -157,7 +164,10 @@ resource "google_artifact_registry_repository_iam_member" "data_node_core_reader
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.data_node_service_account.email}"
 
-  depends_on = [time_sleep.artifact_registry_api_wait_90_seconds]
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    time_sleep.artifact_registry_api_wait_90_seconds,
+  ]
 }
 
 locals {
@@ -187,4 +197,6 @@ resource "google_project_iam_member" "non_api_runtime" {
   project = var.gcp_project_id
   role    = each.value.role
   member  = "serviceAccount:${each.value.service_account_email}"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }

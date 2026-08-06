@@ -15,7 +15,16 @@ make_plan() {
   local output="$2"
 
   jq -n --arg stage "${stage}" '
-    {disabled: 0, network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
+    {
+      disabled: 0,
+      network: 1,
+      "server-safety": 1,
+      server: 2,
+      "server-health": 2,
+      api: 3,
+      worker: 4,
+      build: 5
+    } as $rank
     | [
         {
           stage:"network",
@@ -23,9 +32,19 @@ make_plan() {
           marker:"module.cluster.terraform_data.network_hardening_rollout_stage_network"
         },
         {
+          stage:"server-safety",
+          completion:"module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]",
+          marker:"module.cluster.terraform_data.network_hardening_rollout_stage_server_safety[0]"
+        },
+        {
           stage:"server",
-          completion:"module.cluster.terraform_data.network_hardening_rollout_completion_server[0]",
-          marker:"module.cluster.terraform_data.network_hardening_rollout_stage_server[0]"
+          completion:"module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]",
+          marker:"module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]"
+        },
+        {
+          stage:"server-health",
+          completion:"module.cluster.terraform_data.network_hardening_rollout_completion_server_health[0]",
+          marker:"module.cluster.terraform_data.network_hardening_rollout_stage_server_health[0]"
         },
         {
           stage:"api",
@@ -117,6 +136,20 @@ make_plan build "${test_dir}/valid.json"
 grep -F 'preserves completed network-hardening stage: build' \
   "${test_dir}/valid.output" >/dev/null
 
+make_plan server-safety "${test_dir}/server-safety.json"
+"${assertion_script}" \
+  "${test_dir}/server-safety.json" "${fake_terraform}" dev \
+  >"${test_dir}/server-safety.output"
+grep -F 'preserves completed network-hardening stage: server-safety' \
+  "${test_dir}/server-safety.output" >/dev/null
+
+make_plan server-health "${test_dir}/server-health.json"
+"${assertion_script}" \
+  "${test_dir}/server-health.json" "${fake_terraform}" dev \
+  >"${test_dir}/server-health.output"
+grep -F 'preserves completed network-hardening stage: server-health' \
+  "${test_dir}/server-health.output" >/dev/null
+
 make_plan disabled "${test_dir}/disabled.json"
 expect_failure \
   disabled \
@@ -171,7 +204,7 @@ expect_failure \
 
 jq '
   .resource_changes |= map(
-    select(.address != "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    select(.address != "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
   )
 ' "${test_dir}/valid.json" >"${test_dir}/skip.json"
 expect_failure \
@@ -181,10 +214,10 @@ expect_failure \
 
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.before.input) = "worker"
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.after.input) = "worker"
 ' "${test_dir}/valid.json" >"${test_dir}/mismatch.json"
 expect_failure \

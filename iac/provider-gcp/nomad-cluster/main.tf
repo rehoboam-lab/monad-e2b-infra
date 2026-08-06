@@ -4,6 +4,7 @@ locals {
   build_base_hugepages_percentage  = 60
   client_base_hugepages_percentage = 80
   nomad_server_tag_name            = "${var.prefix}nomad-server"
+  nomad_server_role_label          = "${var.prefix}nomad-server"
 
   nfs_mount_path   = "/orchestrator/shared-store"
   nfs_mount_subdir = "chunks-cache"
@@ -27,19 +28,22 @@ locals {
   ])
 
   file_hash = {
-    "scripts/configure-docker-gcp.sh" = substr(filesha256("${path.module}/scripts/configure-docker-gcp.sh"), 0, 5)
-    "scripts/fetch-gcp-secret.sh"     = substr(filesha256("${path.module}/scripts/fetch-gcp-secret.sh"), 0, 5)
-    "scripts/run-consul.sh"           = substr(filesha256("${path.module}/scripts/run-consul.sh"), 0, 5)
-    "scripts/run-nomad.sh"            = substr(filesha256("${path.module}/scripts/run-nomad.sh"), 0, 5)
+    "scripts/configure-docker-gcp.sh"     = filesha256("${path.module}/scripts/configure-docker-gcp.sh")
+    "scripts/fetch-gcp-secret.sh"         = filesha256("${path.module}/scripts/fetch-gcp-secret.sh")
+    "scripts/refresh-consul-resolvers.sh" = filesha256("${path.module}/scripts/refresh-consul-resolvers.sh")
+    "scripts/run-consul.sh"               = filesha256("${path.module}/scripts/run-consul.sh")
+    "scripts/run-nomad.sh"                = filesha256("${path.module}/scripts/run-nomad.sh")
   }
 
   network_hardening_stage_order = {
-    disabled = 0
-    network  = 1
-    server   = 2
-    api      = 3
-    worker   = 4
-    build    = 5
+    disabled      = 0
+    network       = 1
+    server-safety = 2
+    server        = 3
+    server-health = 4
+    api           = 5
+    worker        = 6
+    build         = 7
   }
   network_hardening_stage_number = local.network_hardening_stage_order[var.network_hardening_rollout_stage]
   os_login_enabled = {
@@ -56,8 +60,24 @@ locals {
     GCP_ZONE                       = var.gcp_zone
     DOMAIN_NAME                    = var.domain_name
     PREFIX                         = var.prefix
+    NOMAD_TOKEN_SECRET_VERSION     = var.nomad_acl_token_secret_version_name
     NETWORK_HARDENING_WAIT_SECONDS = tostring(var.network_hardening_rollout_wait_seconds)
     NETWORK_HARDENING_POLL_SECONDS = "15"
+  }
+}
+
+# This identity/bootstrap migration is intentionally staged only in dev. A
+# production expansion changes instance identities and boot contracts and must
+# arrive through a separately reviewed image/template rollout; never fall back
+# to the legacy shared service account with management-token access.
+resource "terraform_data" "acl_bootstrap_environment_guard" {
+  input = var.environment
+
+  lifecycle {
+    precondition {
+      condition     = var.environment == "dev"
+      error_message = "The role-split ACL/Secret Manager bootstrap is dev-only; nondev requires a separately reviewed identity and image rollout."
+    }
   }
 }
 
@@ -121,7 +141,86 @@ resource "terraform_data" "network_hardening_rollout_stage_network" {
   depends_on = [terraform_data.network_hardening_rollout_completion_network]
 }
 
-resource "terraform_data" "network_hardening_rollout_completion_server" {
+resource "terraform_data" "server_mig_safety_policy" {
+  count = local.network_hardening_stage_number >= local.network_hardening_stage_order["server-safety"] ? 1 : 0
+
+  input = {
+    phase                 = "server-safety"
+    gcp_project_id        = var.gcp_project_id
+    gcp_region            = var.gcp_region
+    server_pool           = "${var.prefix}${var.server_cluster_name}-rig"
+    legacy_health_check   = "${var.prefix}${var.server_cluster_name}-nomad-check"
+    strict_health_check   = "${var.prefix}${var.server_cluster_name}-voter-check"
+    expected_cluster_size = var.server_cluster_size
+    script_sha256         = filesha256("${path.module}/../scripts/configure-server-mig-safety.sh")
+  }
+  triggers_replace = [
+    "server-safety-v1",
+    filesha256("${path.module}/../scripts/configure-server-mig-safety.sh"),
+  ]
+
+  provisioner "local-exec" {
+    command = "\"${abspath("${path.module}/../scripts/configure-server-mig-safety.sh")}\""
+    environment = {
+      GCP_PROJECT_ID             = var.gcp_project_id
+      GCP_REGION                 = var.gcp_region
+      PREFIX                     = var.prefix
+      SERVER_CLUSTER_SIZE        = tostring(var.server_cluster_size)
+      SERVER_SAFETY_WAIT_SECONDS = tostring(min(var.network_hardening_rollout_wait_seconds, 1800))
+      SERVER_SAFETY_POLL_SECONDS = "5"
+    }
+  }
+
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    terraform_data.network_hardening_rollout_stage_network,
+    google_compute_health_check.server_nomad_check_legacy,
+    google_compute_health_check.server_voter_check,
+  ]
+}
+
+// The already-applied historical "server" marker predates the ACL/bootstrap
+// replacement. Move it to the new safety phase, then force-replace its
+// completion through the saved-plan workflow. This prevents a stale state
+// marker from authorizing a template roll before the live MIG has surge=1,
+// unavailable=0, failed-health=DO_NOTHING, and an unattached strict check.
+moved {
+  from = terraform_data.network_hardening_rollout_completion_server[0]
+  to   = terraform_data.network_hardening_rollout_completion_server_safety[0]
+}
+
+moved {
+  from = terraform_data.network_hardening_rollout_stage_server[0]
+  to   = terraform_data.network_hardening_rollout_stage_server_safety[0]
+}
+
+resource "terraform_data" "network_hardening_rollout_completion_server_safety" {
+  count = local.network_hardening_stage_number >= local.network_hardening_stage_order["server-safety"] ? 1 : 0
+
+  input            = "server-safety"
+  triggers_replace = ["server-safety"]
+
+  provisioner "local-exec" {
+    command = "\"${abspath("${path.module}/../scripts/wait-network-hardening-stage.sh")}\""
+    environment = merge(local.network_hardening_waiter_environment, {
+      NETWORK_HARDENING_ROLLOUT_STAGE = "server-safety"
+    })
+  }
+
+  depends_on = [
+    terraform_data.network_hardening_rollout_stage_network,
+    google_compute_health_check.server_voter_check,
+    terraform_data.server_mig_safety_policy,
+  ]
+}
+
+resource "terraform_data" "network_hardening_rollout_stage_server_safety" {
+  count      = local.network_hardening_stage_number >= local.network_hardening_stage_order["server-safety"] ? 1 : 0
+  input      = "server-safety"
+  depends_on = [terraform_data.network_hardening_rollout_completion_server_safety]
+}
+
+resource "terraform_data" "network_hardening_rollout_completion_server_template" {
   count = local.network_hardening_stage_number >= local.network_hardening_stage_order.server ? 1 : 0
 
   input            = "server"
@@ -135,15 +234,57 @@ resource "terraform_data" "network_hardening_rollout_completion_server" {
   }
 
   depends_on = [
-    terraform_data.network_hardening_rollout_stage_network,
+    terraform_data.network_hardening_rollout_stage_server_safety,
     google_compute_region_instance_group_manager.server_pool,
   ]
 }
 
-resource "terraform_data" "network_hardening_rollout_stage_server" {
+resource "terraform_data" "network_hardening_rollout_stage_server_template" {
   count      = local.network_hardening_stage_number >= local.network_hardening_stage_order.server ? 1 : 0
   input      = "server"
-  depends_on = [terraform_data.network_hardening_rollout_completion_server]
+  depends_on = [terraform_data.network_hardening_rollout_completion_server_template]
+}
+
+# This state ledger is created only after the guarded server replacement and
+# its convergence waiter complete. Downstream provider configuration selects
+# the candidate management identity from this persisted handoff rather than an
+# operator boolean. Before this marker exists, the pre-server job stage keeps
+# using the already-registered legacy identity.
+resource "terraform_data" "consul_management_handoff_candidate" {
+  count = local.network_hardening_stage_number >= local.network_hardening_stage_order.server ? 1 : 0
+
+  input = {
+    phase         = "candidate"
+    server_stage  = terraform_data.network_hardening_rollout_stage_server_template[0].output
+    candidate_ref = var.consul_acl_token_candidate_secret_version_name
+  }
+
+  depends_on = [terraform_data.network_hardening_rollout_stage_server_template]
+}
+
+resource "terraform_data" "network_hardening_rollout_completion_server_health" {
+  count = local.network_hardening_stage_number >= local.network_hardening_stage_order["server-health"] ? 1 : 0
+
+  input            = "server-health"
+  triggers_replace = ["server-health"]
+
+  provisioner "local-exec" {
+    command = "\"${abspath("${path.module}/../scripts/wait-network-hardening-stage.sh")}\""
+    environment = merge(local.network_hardening_waiter_environment, {
+      NETWORK_HARDENING_ROLLOUT_STAGE = "server-health"
+    })
+  }
+
+  depends_on = [
+    terraform_data.consul_management_handoff_candidate,
+    google_compute_region_instance_group_manager.server_pool,
+  ]
+}
+
+resource "terraform_data" "network_hardening_rollout_stage_server_health" {
+  count      = local.network_hardening_stage_number >= local.network_hardening_stage_order["server-health"] ? 1 : 0
+  input      = "server-health"
+  depends_on = [terraform_data.network_hardening_rollout_completion_server_health]
 }
 
 resource "terraform_data" "network_hardening_rollout_completion_api" {
@@ -160,7 +301,7 @@ resource "terraform_data" "network_hardening_rollout_completion_api" {
   }
 
   depends_on = [
-    terraform_data.network_hardening_rollout_stage_server,
+    terraform_data.network_hardening_rollout_stage_server_health,
     google_compute_instance_group_manager.api_pool,
   ]
 }
@@ -231,6 +372,8 @@ resource "google_secret_manager_secret" "consul_gossip_encryption_key" {
   replication {
     auto {}
   }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "random_id" "consul_gossip_encryption_key" {
@@ -248,6 +391,8 @@ resource "google_secret_manager_secret" "consul_dns_request_token" {
   replication {
     auto {}
   }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "random_uuid" "consul_dns_request_token" {
@@ -258,28 +403,111 @@ resource "google_secret_manager_secret_version" "consul_dns_request_token" {
   secret_data = random_uuid.consul_dns_request_token.result
 }
 
+# The pre-migration DNS secret is the legacy combined "Client Token" used by
+# every old Consul client for both DNS and service registration. Keep that
+# resource intact until the explicit post-build cleanup; a new SecretID avoids
+# narrowing a credential that old clients still need during staged rollout.
+resource "google_secret_manager_secret" "consul_catalog_read_token" {
+  secret_id = "${var.prefix}consul-catalog-read-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
+}
+
+resource "random_password" "consul_catalog_read_token_seed" {
+  length  = 64
+  special = false
+}
+
+resource "google_secret_manager_secret_version" "consul_catalog_read_token" {
+  secret      = google_secret_manager_secret.consul_catalog_read_token.name
+  secret_data = local.consul_catalog_read_token
+
+  deletion_policy = "DISABLE"
+}
+
+resource "google_secret_manager_secret" "consul_nomad_client_sync_token" {
+  secret_id = "${var.prefix}consul-nomad-client-sync-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
+}
+
+resource "random_password" "consul_nomad_client_sync_token_seed" {
+  length  = 64
+  special = false
+}
+
+resource "google_secret_manager_secret_version" "consul_nomad_client_sync_token" {
+  secret      = google_secret_manager_secret.consul_nomad_client_sync_token.name
+  secret_data = local.consul_nomad_client_sync_token
+
+  deletion_policy = "DISABLE"
+}
+
+resource "google_secret_manager_secret" "consul_worker_autoscaler_token" {
+  secret_id = "${var.prefix}consul-worker-autoscaler-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
+}
+
+resource "random_password" "consul_worker_autoscaler_token_seed" {
+  length  = 64
+  special = false
+}
+
+resource "google_secret_manager_secret_version" "consul_worker_autoscaler_token" {
+  secret      = google_secret_manager_secret.consul_worker_autoscaler_token.name
+  secret_data = local.consul_worker_autoscaler_token
+
+  deletion_policy = "DISABLE"
+}
+
 locals {
-  consul_gossip_secret_name = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-gossip-key"
-  consul_dns_secret_name    = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-dns-request-token"
-  bootstrap_server_secret_names = toset([
-    var.consul_acl_token_secret_name,
-    var.nomad_acl_token_secret_name,
-    local.consul_gossip_secret_name,
-  ])
-  bootstrap_client_secret_names = toset([
-    var.consul_acl_token_secret_name,
-    local.consul_gossip_secret_name,
-    local.consul_dns_secret_name,
-  ])
-  bootstrap_worker_secret_names = toset([
-    var.nomad_acl_token_secret_name,
-  ])
+  consul_catalog_read_token                    = uuidv5("dns", random_password.consul_catalog_read_token_seed.result)
+  consul_nomad_client_sync_token               = uuidv5("dns", random_password.consul_nomad_client_sync_token_seed.result)
+  consul_worker_autoscaler_token               = uuidv5("dns", random_password.consul_worker_autoscaler_token_seed.result)
+  consul_gossip_secret_name                    = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-gossip-key"
+  consul_catalog_read_secret_name              = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-catalog-read-token"
+  consul_nomad_client_sync_secret_name         = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-nomad-client-sync-token"
+  consul_worker_autoscaler_secret_name         = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-worker-autoscaler-token"
+  consul_gossip_secret_version_name            = google_secret_manager_secret_version.consul_gossip_encryption_key.name
+  consul_catalog_read_secret_version_name      = google_secret_manager_secret_version.consul_catalog_read_token.name
+  consul_nomad_client_sync_secret_version_name = google_secret_manager_secret_version.consul_nomad_client_sync_token.name
+  consul_worker_autoscaler_secret_version_name = google_secret_manager_secret_version.consul_worker_autoscaler_token.name
+  # Keep for_each identities static even while a prerequisite secret is being
+  # created. Secret resource names may be unknown during a targeted plan; using
+  # them as set keys makes Terraform unable to construct the graph safely.
+  bootstrap_server_secrets = {
+    consul_management_candidate = var.consul_acl_token_candidate_secret_name
+    nomad_management            = var.nomad_acl_token_secret_name
+    consul_gossip               = local.consul_gossip_secret_name
+    consul_catalog_read         = local.consul_catalog_read_secret_name
+    consul_nomad_client_sync    = local.consul_nomad_client_sync_secret_name
+    consul_worker_autoscaler    = local.consul_worker_autoscaler_secret_name
+  }
+  bootstrap_client_secrets = {
+    consul_gossip            = local.consul_gossip_secret_name
+    consul_catalog_read      = local.consul_catalog_read_secret_name
+    consul_nomad_client_sync = local.consul_nomad_client_sync_secret_name
+  }
+  bootstrap_worker_secrets = {}
 }
 
 # Startup metadata carries only these non-secret resource names. Each node uses
 # its attached identity to retrieve the current enabled version at boot.
 resource "google_secret_manager_secret_iam_member" "bootstrap_server" {
-  for_each = local.bootstrap_server_secret_names
+  for_each = local.bootstrap_server_secrets
 
   project   = var.gcp_project_id
   secret_id = each.value
@@ -287,22 +515,28 @@ resource "google_secret_manager_secret_iam_member" "bootstrap_server" {
   member    = "serviceAccount:${var.nomad_server_service_account_email}"
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     google_secret_manager_secret.consul_gossip_encryption_key,
     google_secret_manager_secret.consul_dns_request_token,
+    google_secret_manager_secret.consul_catalog_read_token,
+    google_secret_manager_secret.consul_nomad_client_sync_token,
+    google_secret_manager_secret.consul_worker_autoscaler_token,
   ]
 }
 
 resource "google_secret_manager_secret_iam_member" "bootstrap_worker" {
-  for_each = local.bootstrap_worker_secret_names
+  for_each = local.bootstrap_worker_secrets
 
   project   = var.gcp_project_id
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.worker_build_service_account_email}"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "google_secret_manager_secret_iam_member" "bootstrap_data" {
-  for_each = local.bootstrap_client_secret_names
+  for_each = local.bootstrap_client_secrets
 
   project   = var.gcp_project_id
   secret_id = each.value
@@ -310,8 +544,11 @@ resource "google_secret_manager_secret_iam_member" "bootstrap_data" {
   member    = "serviceAccount:${var.data_node_service_account_email}"
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     google_secret_manager_secret.consul_gossip_encryption_key,
     google_secret_manager_secret.consul_dns_request_token,
+    google_secret_manager_secret.consul_catalog_read_token,
+    google_secret_manager_secret.consul_nomad_client_sync_token,
   ]
 }
 
@@ -339,10 +576,11 @@ resource "google_project_iam_member" "logging_writer" {
 variable "setup_files" {
   type = map(string)
   default = {
-    "scripts/configure-docker-gcp.sh" = "configure-docker-gcp",
-    "scripts/fetch-gcp-secret.sh"     = "fetch-gcp-secret",
-    "scripts/run-nomad.sh"            = "run-nomad",
-    "scripts/run-consul.sh"           = "run-consul"
+    "scripts/configure-docker-gcp.sh"     = "configure-docker-gcp",
+    "scripts/fetch-gcp-secret.sh"         = "fetch-gcp-secret",
+    "scripts/refresh-consul-resolvers.sh" = "refresh-consul-resolvers",
+    "scripts/run-nomad.sh"                = "run-nomad",
+    "scripts/run-consul.sh"               = "run-consul"
   }
 }
 
@@ -359,6 +597,8 @@ resource "google_storage_bucket_object" "setup_config_objects" {
   lifecycle {
     create_before_destroy = true
   }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 module "network" {
@@ -441,11 +681,13 @@ module "build_cluster" {
   node_labels               = each.value.node_labels
   use_cloud_nat             = var.api_use_nat
 
-  cluster_tag_name            = var.cluster_tag_name
-  nomad_server_tag_name       = local.nomad_server_tag_name
-  node_pool                   = var.build_node_pool
-  nomad_port                  = var.nomad_port
-  nomad_acl_token_secret_name = var.nomad_acl_token_secret_name
+  cluster_tag_name              = var.cluster_tag_name
+  nomad_server_tag_name         = local.nomad_server_tag_name
+  consul_server_mig_name        = "${local.server_pool_name}-rig"
+  consul_server_role_label      = local.nomad_server_role_label
+  consul_server_service_account = var.nomad_server_service_account_email
+  node_pool                     = var.build_node_pool
+  nomad_port                    = var.nomad_port
 
   docker_contexts_bucket_name = var.docker_contexts_bucket_name
   cluster_setup_bucket_name   = var.cluster_setup_bucket_name
@@ -466,14 +708,14 @@ module "build_cluster" {
 
   file_hash = local.file_hash
 
-  set_orchestrator_version_metadata  = false
   enable_os_login                    = local.os_login_enabled.build
   os_login_operator_access_confirmed = terraform_data.os_login_operator_access_guard.output
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     google_secret_manager_secret_iam_member.bootstrap_worker,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/refresh-consul-resolvers.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"]
   ]
 }
@@ -507,11 +749,13 @@ module "client_cluster" {
   node_labels               = each.value.node_labels
   use_cloud_nat             = var.api_use_nat
 
-  cluster_tag_name            = var.cluster_tag_name
-  nomad_server_tag_name       = local.nomad_server_tag_name
-  node_pool                   = var.orchestrator_node_pool
-  nomad_port                  = var.nomad_port
-  nomad_acl_token_secret_name = var.nomad_acl_token_secret_name
+  cluster_tag_name              = var.cluster_tag_name
+  nomad_server_tag_name         = local.nomad_server_tag_name
+  consul_server_mig_name        = "${local.server_pool_name}-rig"
+  consul_server_role_label      = local.nomad_server_role_label
+  consul_server_service_account = var.nomad_server_service_account_email
+  node_pool                     = var.orchestrator_node_pool
+  nomad_port                    = var.nomad_port
 
   docker_contexts_bucket_name = var.docker_contexts_bucket_name
   cluster_setup_bucket_name   = var.cluster_setup_bucket_name
@@ -532,15 +776,11 @@ module "client_cluster" {
 
   file_hash = local.file_hash
 
-  # The dev orchestrator job has the stable ID "dev" and no version metadata
-  # constraint. Avoid waiting during cluster bootstrap for the phase-two Nomad
-  # variable; non-dev keeps version-pinned worker scheduling.
-  set_orchestrator_version_metadata = var.environment != "dev"
-
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     google_secret_manager_secret_iam_member.bootstrap_worker,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/refresh-consul-resolvers.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"]
   ]
 }

@@ -4,6 +4,8 @@
 resource "google_service_account" "api_controller_service_account" {
   account_id   = "${var.prefix}api-controller"
   display_name = "API and Worker Capacity Controller Service Account"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "google_artifact_registry_repository_iam_member" "api_controller_orchestration_reader" {
@@ -11,7 +13,10 @@ resource "google_artifact_registry_repository_iam_member" "api_controller_orches
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.api_controller_service_account.email}"
 
-  depends_on = [time_sleep.artifact_registry_api_wait_90_seconds]
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    time_sleep.artifact_registry_api_wait_90_seconds,
+  ]
 }
 
 resource "google_artifact_registry_repository_iam_member" "api_controller_core_reader" {
@@ -19,7 +24,10 @@ resource "google_artifact_registry_repository_iam_member" "api_controller_core_r
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.api_controller_service_account.email}"
 
-  depends_on = [time_sleep.artifact_registry_api_wait_90_seconds]
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    time_sleep.artifact_registry_api_wait_90_seconds,
+  ]
 }
 
 locals {
@@ -51,6 +59,8 @@ resource "google_storage_bucket_iam_member" "api_controller" {
   bucket = each.value.bucket
   role   = each.value.role
   member = "serviceAccount:${google_service_account.api_controller_service_account.email}"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 resource "google_project_iam_member" "api_controller" {
@@ -59,4 +69,6 @@ resource "google_project_iam_member" "api_controller" {
   project = var.gcp_project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.api_controller_service_account.email}"
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }

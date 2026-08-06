@@ -1,4 +1,8 @@
 job "docker-reverse-proxy" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   node_pool   = "${node_pool}"
   type        = "service"
   priority    = 85

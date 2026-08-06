@@ -13,11 +13,23 @@ printf '%s\n' \
   'set -euo pipefail' \
   'printf "%s\n" "$*" >>"${FAKE_GCLOUD_LOG:?}"' \
   'if [[ "${1:-}" == "secrets" && "${2:-}" == "versions" && "${3:-}" == "access" ]]; then' \
+  '  [[ "${4:-}" == "7" ]]' \
+  '  grep -F -- "--secret=e2b-nomad-secret-id" <<<"$*" >/dev/null' \
   '  printf "%s\n" "fixture-nomad-token"' \
   '  exit 0' \
   'fi' \
   '[[ "${1:-}" == "compute" ]] || exit 2' \
   'case "${2:-}" in' \
+  '  health-checks)' \
+  '    [[ "${3:-}" == "describe" ]] || exit 2' \
+  '    name="${4:?}"' \
+  '    case "${name}" in' \
+  '      e2b-orch-server-nomad-check) port=4646; path=/v1/agent/health ;;' \
+  '      e2b-orch-server-voter-check) port=50001; path=/healthz ;;' \
+  '      *) exit 2 ;;' \
+  '    esac' \
+  '    jq -cn --arg name "${name}" --argjson port "${port}" --arg path "${path}" "{name:\$name,type:\"HTTP\",checkIntervalSec:5,timeoutSec:5,healthyThreshold:2,unhealthyThreshold:10,httpHealthCheck:{port:\$port,requestPath:\$path}}"' \
+  '    ;;' \
   '  firewall-rules)' \
   '    name="${4:?}"' \
   '    case "${name}" in' \
@@ -60,7 +72,12 @@ printf '%s\n' \
   '      elif [[ "${mode}" == "missing-version" ]]; then' \
   '        jq -cn --argjson size "${size}" --arg template "${target_template}" "{targetSize:\$size,versions:[{instanceTemplate:\$template}],status:{isStable:true},currentActions:{none:\$size}}"' \
   '      else' \
-  '        jq -cn --argjson size "${size}" --arg template "${target_template}" "{targetSize:\$size,versions:[{instanceTemplate:\$template}],status:{isStable:true,versionTarget:{isReached:true}},currentActions:{none:\$size}}"' \
+  '        if [[ "${group}" == "e2b-orch-server-rig" ]]; then' \
+  '          if [[ "${NETWORK_HARDENING_ROLLOUT_STAGE:-}" == "server-health" ]]; then health=e2b-orch-server-voter-check; else health=e2b-orch-server-nomad-check; fi' \
+  '          jq -cn --argjson size "${size}" --arg template "${target_template}" --arg health "https://www.googleapis.com/compute/v1/projects/monad-code/global/healthChecks/${health}" "{targetSize:\$size,versions:[{instanceTemplate:\$template}],status:{isStable:true,versionTarget:{isReached:true}},currentActions:{none:\$size},updatePolicy:{type:\"PROACTIVE\",minimalAction:\"REPLACE\",replacementMethod:\"SUBSTITUTE\",maxSurge:{fixed:1},maxUnavailable:{fixed:0}},instanceLifecyclePolicy:{defaultActionOnFailure:\"REPAIR\",forceUpdateOnRepair:\"NO\",onFailedHealthCheck:\"DO_NOTHING\"},autoHealingPolicies:[{healthCheck:\$health,initialDelaySec:120}]}"' \
+  '        else' \
+  '          jq -cn --argjson size "${size}" --arg template "${target_template}" "{targetSize:\$size,versions:[{instanceTemplate:\$template}],status:{isStable:true,versionTarget:{isReached:true}},currentActions:{none:\$size}}"' \
+  '        fi' \
   '      fi' \
   '      exit 0' \
   '    fi' \
@@ -128,12 +145,15 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'printf "%s\n" "$*" >>"${FAKE_CURL_ARGV_LOG:?}"' \
-  'if [[ "$*" == "--fail --silent --show-error --connect-timeout 5 --max-time 10 https://api.example.invalid/health" ]]; then' \
+  '[[ "${1:-}" == "--disable" ]]' \
+  '[[ "$*" == *"--noproxy *"* ]]' \
+  'for proxy_name in ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; do [[ -z "${!proxy_name+x}" ]]; done' \
+  'if [[ "$*" == *"--fail --silent --show-error --connect-timeout 5 --max-time 10 https://api.example.invalid/health" ]]; then' \
   '  if [[ "${FAKE_CURL_MODE:-healthy}" == "api-unhealthy" ]]; then exit 1; fi' \
   '  printf "%s\n" "ok"' \
   '  exit 0' \
   'fi' \
-  '[[ "$*" == "--config -" ]]' \
+  '[[ "$*" == *"--config -" ]]' \
   'config="$(cat)"' \
   'grep -F "header = \"X-Nomad-Token: fixture-nomad-token\"" <<<"${config}" >/dev/null' \
   'url="$(sed -n "s/^url = \"\\(.*\\)\"$/\\1/p" <<<"${config}")"' \
@@ -178,6 +198,7 @@ run_stage() {
     GCP_ZONE=us-east4-c \
     DOMAIN_NAME=example.invalid \
     PREFIX=e2b- \
+    NOMAD_TOKEN_SECRET_VERSION=projects/monad-code/secrets/e2b-nomad-secret-id/versions/7 \
     NETWORK_HARDENING_ROLLOUT_STAGE="${stage}" \
     NETWORK_HARDENING_WAIT_SECONDS="${max_seconds}" \
     NETWORK_HARDENING_POLL_SECONDS="${poll_seconds}" \
@@ -188,6 +209,9 @@ run_stage() {
     FAKE_GCLOUD_MODE="${mode}" \
     FAKE_CURL_ARGV_LOG="${test_dir}/curl-argv.log" \
     FAKE_CURL_MODE="${curl_mode}" \
+    ALL_PROXY=http://proxy.invalid \
+    HTTP_PROXY=http://proxy.invalid \
+    HTTPS_PROXY=http://proxy.invalid \
     "${script_dir}/wait-network-hardening-stage.sh"
 }
 
@@ -212,11 +236,22 @@ expect_fail "public deny cannot follow the legacy allow" \
 expect_fail "legacy public allow cannot precede the deny" \
   run_stage network unsafe-legacy-precedence 1 1
 
+run_stage server-safety >"${test_dir}/server-safety.output"
+grep -E 'replacements=.*identity_sha256=[0-9a-f]{64}' "${test_dir}/server-safety.output" >/dev/null
+test "$(grep -c '^compute ssh e2b-orch-server-' "${test_dir}/gcloud.log" || true)" -eq 0
+
 run_stage server >"${test_dir}/server.output"
 grep -E 'replacements=.*identity_sha256=[0-9a-f]{64}' "${test_dir}/server.output" >/dev/null
 grep -F 'backend-services get-health e2b-backend-nomad --global' \
   "${test_dir}/gcloud.log" >/dev/null
 test "$(grep -c '^compute ssh e2b-orch-server-' "${test_dir}/gcloud.log")" -eq 3
+grep -F -- "curl --disable --noproxy '*' --proto '=http'" \
+  "${test_dir}/gcloud.log" >/dev/null
+
+run_stage server-health >"${test_dir}/server-health.output"
+grep -E 'replacements=.*identity_sha256=[0-9a-f]{64}' "${test_dir}/server-health.output" >/dev/null
+grep -F 'health-checks describe e2b-orch-server-voter-check' \
+  "${test_dir}/gcloud.log" >/dev/null
 
 run_stage api >"${test_dir}/api.output"
 grep -E 'replacements=.*identity_sha256=[0-9a-f]{64}' "${test_dir}/api.output" >/dev/null
@@ -278,6 +313,7 @@ expect_fail "post-replacement evidence requires the deployment domain" \
     GCP_REGION=us-east4 \
     GCP_ZONE=us-east4-c \
     PREFIX=e2b- \
+    NOMAD_TOKEN_SECRET_VERSION=projects/monad-code/secrets/e2b-nomad-secret-id/versions/7 \
     NETWORK_HARDENING_ROLLOUT_STAGE=server \
     NETWORK_HARDENING_WAIT_SECONDS=1 \
     NETWORK_HARDENING_POLL_SECONDS=0 \

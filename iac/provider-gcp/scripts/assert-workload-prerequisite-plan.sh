@@ -143,7 +143,9 @@ expected_resources="$(
     {address:"module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.loki_storage_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/compute.networkViewer\"]",type:"google_project_iam_member"},
     {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/logging.logWriter\"]",type:"google_project_iam_member"},
     {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/monitoring.editor\"]",type:"google_project_iam_member"},
@@ -152,7 +154,8 @@ expected_resources="$(
     {address:"module.init.google_project_iam_member.non_api_runtime[\"server:roles/monitoring.editor\"]",type:"google_project_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.api_controller[\"controller_artifact\"]",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.api_controller[\"instance_setup\"]",type:"google_storage_bucket_iam_member"},
-    {address:"module.init.google_storage_bucket_iam_member.api_controller[\"loki\"]",type:"google_storage_bucket_iam_member"}
+    {address:"module.init.google_storage_bucket_iam_member.api_controller[\"loki\"]",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.terraform_data.acl_bootstrap_environment_guard",type:"terraform_data"}
   ] | sort_by(.address)'
 )"
 
@@ -207,13 +210,6 @@ if ! jq -ne \
       .actions == ["create"]
       or .actions == ["no-op"]
       or (
-        (
-          .address == "module.init.google_storage_bucket_iam_member.loki_storage_iam"
-          or .address == "module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam"
-        )
-        and .actions == ["update"]
-      )
-      or (
         .address == "terraform_data.cloud_sql_connection_budget"
         and .actions == ["update"]
       )
@@ -225,6 +221,27 @@ if ! jq -ne \
   printf 'Expected: %s\n' "$(jq -c . <<<"${expected_resources}")" >&2
   printf 'Reviewed: %s\n' "$(jq -c . <<<"${reviewed_resources}")" >&2
   printf 'Unexpected mutations: %s\n' "$(jq -c . <<<"${unexpected_mutations}")" >&2
+  exit 1
+fi
+
+if ! jq -e '
+  [
+    .resource_changes[]?
+    | select(.address == "module.init.terraform_data.acl_bootstrap_environment_guard")
+  ] as $guard
+  | ($guard | length) == 1
+    and $guard[0].mode == "managed"
+    and $guard[0].type == "terraform_data"
+    and $guard[0].change.after.input == "dev"
+    and (
+      $guard[0].change.actions == ["create"]
+      or (
+        $guard[0].change.actions == ["no-op"]
+        and $guard[0].change.before.input == "dev"
+      )
+    )
+' <<<"${plan_json}" >/dev/null; then
+  printf 'Refusing workload prerequisite plan: the module.init dev-only ACL migration guard is missing or closed.\n' >&2
   exit 1
 fi
 
@@ -394,8 +411,10 @@ if ! jq -e \
   | row("module.init.google_artifact_registry_repository_iam_member.data_node_core_reader") as $data_core
   | row("module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam") as $server_setup
   | row("module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam") as $data_setup
-  | row("module.init.google_storage_bucket_iam_member.loki_storage_iam") as $loki
-  | row("module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam") as $clickhouse
+  | row("module.init.google_storage_bucket_iam_member.loki_storage_iam") as $loki_legacy
+  | row("module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam") as $loki_data
+  | row("module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam") as $clickhouse_legacy
+  | row("module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam") as $clickhouse_data
   | [
       {kind:"server", role:"roles/compute.networkViewer"},
       {kind:"server", role:"roles/logging.logWriter"},
@@ -434,30 +453,20 @@ if ! jq -e \
   and $data_setup.change.after.bucket == ($project + "-instance-setup")
   and $data_setup.change.after.role == "roles/storage.objectViewer"
   and exact_member($data_setup; $data)
-  and exact_member($loki; $data)
-  and $loki.change.after.bucket == ($project + "-loki-storage")
-  and $loki.change.after.role == "roles/storage.objectUser"
-  and (
-    ($loki | create_or_stable)
-    or (
-      $loki.change.actions == ["update"]
-      and $loki.change.before.member == $worker
-      and $loki.change.before.bucket == ($project + "-loki-storage")
-      and $loki.change.before.role == "roles/storage.objectUser"
-    )
+  and all([$loki_legacy, $loki_data][];
+    create_or_stable
+    and .change.after.bucket == ($project + "-loki-storage")
+    and .change.after.role == "roles/storage.objectUser"
   )
-  and exact_member($clickhouse; $data)
-  and $clickhouse.change.after.bucket == ($project + "-clickhouse-backups")
-  and $clickhouse.change.after.role == "roles/storage.objectUser"
-  and (
-    ($clickhouse | create_or_stable)
-    or (
-      $clickhouse.change.actions == ["update"]
-      and $clickhouse.change.before.member == $worker
-      and $clickhouse.change.before.bucket == ($project + "-clickhouse-backups")
-      and $clickhouse.change.before.role == "roles/storage.objectUser"
-    )
+  and exact_member($loki_legacy; $worker)
+  and exact_member($loki_data; $data)
+  and all([$clickhouse_legacy, $clickhouse_data][];
+    create_or_stable
+    and .change.after.bucket == ($project + "-clickhouse-backups")
+    and .change.after.role == "roles/storage.objectUser"
   )
+  and exact_member($clickhouse_legacy; $worker)
+  and exact_member($clickhouse_data; $data)
   and all($project_roles[];
     . as $want
     | row("module.init.google_project_iam_member.non_api_runtime[\"" + $want.kind + ":" + $want.role + "\"]") as $grant

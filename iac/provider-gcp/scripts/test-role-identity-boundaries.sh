@@ -26,13 +26,13 @@ server_block="$(sed -n '/resource "google_secret_manager_secret_iam_member" "boo
 worker_block="$(sed -n '/resource "google_secret_manager_secret_iam_member" "bootstrap_worker"/,/^}/p' "${cluster}/main.tf")"
 data_block="$(sed -n '/resource "google_secret_manager_secret_iam_member" "bootstrap_data"/,/^}/p' "${cluster}/main.tf")"
 api_block="$(sed -n '/resource "google_secret_manager_secret_iam_member" "bootstrap_api"/,/^}/p' "${cluster}/nodepool-api.tf")"
-grep -F 'local.bootstrap_server_secret_names' <<<"$server_block" >/dev/null
+grep -F 'local.bootstrap_server_secrets' <<<"$server_block" >/dev/null
 grep -F 'var.nomad_server_service_account_email' <<<"$server_block" >/dev/null
-grep -F 'local.bootstrap_worker_secret_names' <<<"$worker_block" >/dev/null
+grep -F 'local.bootstrap_worker_secrets' <<<"$worker_block" >/dev/null
 grep -F 'var.worker_build_service_account_email' <<<"$worker_block" >/dev/null
-grep -F 'local.bootstrap_client_secret_names' <<<"$data_block" >/dev/null
+grep -F 'local.bootstrap_client_secrets' <<<"$data_block" >/dev/null
 grep -F 'var.data_node_service_account_email' <<<"$data_block" >/dev/null
-grep -F 'local.bootstrap_client_secret_names' <<<"$api_block" >/dev/null
+grep -F 'local.bootstrap_client_secrets' <<<"$api_block" >/dev/null
 grep -F 'var.api_controller_service_account_email' <<<"$api_block" >/dev/null
 
 worker_startup="${cluster}/scripts/start-client.sh"

@@ -349,12 +349,14 @@ variable "network_hardening_rollout_stage" {
     condition = contains([
       "disabled",
       "network",
+      "server-safety",
       "server",
+      "server-health",
       "api",
       "worker",
       "build",
     ], var.network_hardening_rollout_stage)
-    error_message = "network_hardening_rollout_stage must be disabled, network, server, api, worker, or build."
+    error_message = "network_hardening_rollout_stage must be disabled, network, server-safety, server, server-health, api, worker, or build."
   }
 }
 
@@ -945,10 +947,14 @@ variable "orchestrator_env_vars" {
       toset(keys(var.orchestrator_env_vars)),
       toset([
         "ALLOW_SANDBOX_INTERNAL_CIDRS",
+        "CONSUL_HTTP_ADDR",
+        "CONSUL_HTTP_REQUIRE_REMOTE",
+        "CONSUL_TOKEN",
         "SANDBOX_ORCHESTRATOR_IP",
+        "USE_LOCAL_NAMESPACE_STORAGE",
       ]),
     )) == 0
-    error_message = "orchestrator_env_vars cannot override ALLOW_SANDBOX_INTERNAL_CIDRS or SANDBOX_ORCHESTRATOR_IP; GCP guest isolation reserves both values."
+    error_message = "orchestrator_env_vars cannot override the GCP isolation or host-local namespace-storage contract."
   }
 }
 
@@ -980,6 +986,19 @@ variable "template_manager_env_vars" {
   type      = map(string)
   default   = {}
   sensitive = true
+
+  validation {
+    condition = length(setintersection(
+      toset(keys(var.template_manager_env_vars)),
+      toset([
+        "CONSUL_HTTP_ADDR",
+        "CONSUL_HTTP_REQUIRE_REMOTE",
+        "CONSUL_TOKEN",
+        "USE_LOCAL_NAMESPACE_STORAGE",
+      ]),
+    )) == 0
+    error_message = "template_manager_env_vars cannot override the host-local namespace-storage contract."
+  }
 }
 
 variable "docker_reverse_proxy_env_vars" {

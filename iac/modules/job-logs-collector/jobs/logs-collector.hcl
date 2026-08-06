@@ -1,4 +1,8 @@
 job "logs-collector" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   type      = "system"
   node_pool = "all"
 
@@ -25,8 +29,9 @@ job "logs-collector" {
     }
 
     service {
-      name = "logs-collector"
-      port = "logs"
+      provider = "nomad"
+      name     = "logs-collector"
+      port     = "logs"
       tags = [
         "logs",
         "health",

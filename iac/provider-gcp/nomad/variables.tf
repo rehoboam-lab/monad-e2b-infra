@@ -14,8 +14,19 @@ variable "core_repository_name" {
   type = string
 }
 
-variable "consul_acl_token_secret" {
-  type = string
+variable "consul_catalog_read_token" {
+  type      = string
+  sensitive = true
+}
+
+variable "consul_worker_autoscaler_token" {
+  type      = string
+  sensitive = true
+}
+
+variable "nomad_server_discovery_filter" {
+  type        = string
+  description = "Exact Compute API filter used by the server-metrics collector."
 }
 
 variable "template_bucket_name" {

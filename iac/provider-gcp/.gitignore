@@ -1,6 +1,7 @@
 .terraform
 .idea
 .tfplan.*
+.consul-management-handoff.*.json
 .DS_Store
 
 terraform.tfvars
