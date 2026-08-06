@@ -67,7 +67,10 @@ done < <(
 
 capture_file="${test_root}/request.json"
 port_file="${test_root}/port"
-go run "${script_dir}/testdata/nomad-request-capture/main.go" \
+capture_server="${test_root}/nomad-request-capture"
+go build -o "${capture_server}" \
+  "${script_dir}/testdata/nomad-request-capture/main.go"
+"${capture_server}" \
   "${capture_file}" "${port_file}" >"${test_root}/server.log" 2>&1 &
 server_pid=$!
 for _ in {1..200}; do
@@ -78,7 +81,11 @@ for _ in {1..200}; do
   }
   sleep 0.05
 done
-[[ -s "${port_file}" ]]
+[[ -s "${port_file}" ]] || {
+  printf 'Nomad request-capture server did not become ready within 10 seconds.\n' >&2
+  sed -n '1,120p' "${test_root}/server.log" >&2
+  exit 1
+}
 port="$(tr -d '[:space:]' <"${port_file}")"
 [[ "${port}" =~ ^[1-9][0-9]*$ ]]
 
