@@ -36,7 +36,7 @@ if grep -F 'consul_token' <<<"${provider_block}" >/dev/null; then
   printf 'Nomad provider configuration still has a provider-wide Consul token.\n' >&2
   exit 1
 fi
-if rg -n 'variable "consul_acl_token_secret"|consul_acl_token_secret[[:space:]]*=' \
+if grep -REn 'variable "consul_acl_token_secret"|consul_acl_token_secret[[:space:]]*=' \
   "${provider_root}/nomad" "${provider_root}/main.tf" >/dev/null; then
   printf 'The GCP Nomad module still accepts a provider-wide Consul management token.\n' >&2
   exit 1
@@ -50,7 +50,7 @@ jobspec_count=0
 while IFS= read -r jobspec; do
   jobspec_count=$((jobspec_count + 1))
   marker_count="$(grep -Fc 'monad_acl_handoff_revision = "1"' "${jobspec}" || true)"
-  if rg -q '^[[:space:]]*(type[[:space:]]*=[[:space:]]*"batch"|periodic[[:space:]]*\{|parameterized[[:space:]]*\{)' "${jobspec}"; then
+  if grep -Eq '^[[:space:]]*(type[[:space:]]*=[[:space:]]*"batch"|periodic[[:space:]]*\{|parameterized[[:space:]]*\{)' "${jobspec}"; then
     if [[ "${marker_count}" -ne 0 ]]; then
       printf 'Triggered batch jobspec must not carry the handoff marker or be force-rerun: %s\n' "${jobspec}" >&2
       exit 1
@@ -59,8 +59,10 @@ while IFS= read -r jobspec; do
     printf 'Long-running Nomad jobspec lacks the unique ACL handoff marker: %s\n' "${jobspec}" >&2
     exit 1
   fi
-done < <(rg -l '^job[[:space:]]+"' \
-  "${repo_root}/iac/modules" "${provider_root}/nomad" -g '*.hcl' | sort)
+done < <(
+  find "${repo_root}/iac/modules" "${provider_root}/nomad" -type f -name '*.hcl' \
+    -exec grep -lE '^job[[:space:]]+"' {} + | sort
+)
 (( jobspec_count > 0 ))
 
 capture_file="${test_root}/request.json"
