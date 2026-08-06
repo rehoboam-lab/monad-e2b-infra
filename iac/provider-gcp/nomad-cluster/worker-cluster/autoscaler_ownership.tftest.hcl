@@ -22,6 +22,9 @@ variables {
   use_cloud_nat                      = true
   cluster_tag_name                   = "monad-cluster"
   nomad_server_tag_name              = "monad-nomad-server"
+  consul_server_mig_name             = "e2b-orch-server-rig"
+  consul_server_role_label           = "e2b-nomad-server"
+  consul_server_service_account      = "e2b-nomad-server@monad-code.iam.gserviceaccount.com"
   google_service_account_email       = "worker@monad-code.iam.gserviceaccount.com"
   nomad_port                         = 4646
   node_pool                          = "default"

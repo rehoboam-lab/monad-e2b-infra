@@ -479,7 +479,7 @@ jq '
       "after": {
         "bucket": "operator-instance-setup",
         "deletion_policy": "ABANDON",
-        "name": "run-nomad-def34.sh"
+        "name": ("run-nomad-" + ("d" * 64) + ".sh")
       },
       "after_unknown": {}
     }

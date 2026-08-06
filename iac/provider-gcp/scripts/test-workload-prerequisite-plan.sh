@@ -9,7 +9,6 @@ cloud_sql_fixture="${script_dir}/testdata/cloud-sql-workload-resources.json"
 cloud_sql_project_state="${script_dir}/testdata/cloud-sql-project-state.json"
 api_controller_identity_fixture="${script_dir}/testdata/api-controller-identity-workload-resources.json"
 role_identity_fixture="${script_dir}/testdata/role-identity-workload-resources.json"
-acl_bootstrap_fixture="${script_dir}/testdata/acl-bootstrap-workload-resources.json"
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "${test_dir}"' EXIT
 
@@ -72,8 +71,7 @@ jq -n \
   --slurpfile cloud_sql "${cloud_sql_fixture}" \
   --slurpfile cloud_sql_project "${cloud_sql_project_state}" \
   --slurpfile api_controller_identity "${api_controller_identity_fixture}" \
-  --slurpfile role_identity "${role_identity_fixture}" \
-  --slurpfile acl_bootstrap "${acl_bootstrap_fixture}" '
+  --slurpfile role_identity "${role_identity_fixture}" '
   {
     format_version: "1.2",
     terraform_version: "1.7.5",
@@ -94,7 +92,6 @@ jq -n \
       )
       + $api_controller_identity[0]
       + $role_identity[0]
-      + $acl_bootstrap[0]
       + [
         {
           address: "module.init.terraform_data.acl_bootstrap_environment_guard",

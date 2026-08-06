@@ -162,6 +162,8 @@ make_plan() {
       };
     {network:1,"server-safety":2,server:3,"server-health":4,api:5,worker:6,build:7} as $rank
     | ["network","server-safety","server","server-health","api","worker","build"] as $stages
+    | ("1" * 64) as $previous_setup_hash
+    | ("2" * 64) as $current_setup_hash
     | {
         network:"module.cluster.terraform_data.network_hardening_rollout_completion_network",
         "server-safety":"module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]",
@@ -358,13 +360,13 @@ make_plan() {
                       before:{
                         bucket:"monad-code-instance-setup",
                         deletion_policy:"ABANDON",
-                        name:($object + (if $stage == "server" then "-11111.sh" else "-22222.sh" end)),
+                        name:($object + "-" + (if $stage == "server" then $previous_setup_hash else $current_setup_hash end) + ".sh"),
                         source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
                       },
                       after:{
                         bucket:"monad-code-instance-setup",
                         deletion_policy:"ABANDON",
-                        name:($object + "-22222.sh"),
+                        name:($object + "-" + $current_setup_hash + ".sh"),
                         source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
                       }
                     }
