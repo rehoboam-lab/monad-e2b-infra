@@ -14,8 +14,8 @@ evidence_path="${3:?usage: assert-consul-handoff-post-plan.sh PLAN TERRAFORM_BIN
   exit 1
 }
 
-plan_permissions="$(stat -f '%Lp' "${plan_path}" 2>/dev/null || stat -c '%a' "${plan_path}")"
-evidence_permissions="$(stat -f '%Lp' "${evidence_path}" 2>/dev/null || stat -c '%a' "${evidence_path}")"
+plan_permissions="$(stat -c '%a' "${plan_path}" 2>/dev/null || stat -f '%Lp' "${plan_path}")"
+evidence_permissions="$(stat -c '%a' "${evidence_path}" 2>/dev/null || stat -f '%Lp' "${evidence_path}")"
 [[ "${plan_permissions}" == 600 ]] || {
   printf 'Consul handoff post-plan must have mode 0600.\n' >&2
   exit 1

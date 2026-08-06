@@ -40,10 +40,10 @@ assert_private_regular_file() {
     exit 1
   fi
 
-  if mode_bits="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode_bits="$(stat -c '%a' "${path}" 2>/dev/null)"; then
     :
   else
-    mode_bits="$(stat -c '%a' "${path}")"
+    mode_bits="$(stat -f '%Lp' "${path}")"
   fi
   if (( (8#${mode_bits} & 077) != 0 )); then
     printf '%s must not be readable or writable by group/other: %s (mode %s)\n' \
