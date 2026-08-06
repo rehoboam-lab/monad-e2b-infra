@@ -10,7 +10,7 @@ for identity in \
   nomad_server_service_account \
   data_node_service_account \
   api_controller_service_account; do
-  rg -F "resource \"google_service_account\" \"${identity}\"" "$init" >/dev/null
+  grep -RF "resource \"google_service_account\" \"${identity}\"" "$init" >/dev/null
 done
 
 grep -F 'email = var.nomad_server_service_account_email' \
