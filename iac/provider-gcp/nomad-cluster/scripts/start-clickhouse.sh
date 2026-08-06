@@ -73,11 +73,42 @@ EOF
 sudo sysctl -p
 
 # These variables are passed in via Terraform template interpolation
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-consul-${RUN_CONSUL_FILE_HASH}.sh" /opt/consul/bin/run-consul.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-nomad-${RUN_NOMAD_FILE_HASH}.sh" /opt/nomad/bin/run-nomad.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/fetch-gcp-secret-${FETCH_GCP_SECRET_FILE_HASH}.sh" /opt/fetch-gcp-secret.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/configure-docker-gcp-${CONFIGURE_DOCKER_FILE_HASH}.sh" /opt/configure-docker-gcp.sh
-chmod +x /opt/consul/bin/run-consul.sh /opt/nomad/bin/run-nomad.sh /opt/fetch-gcp-secret.sh /opt/configure-docker-gcp.sh
+install_setup_script() {
+  local object_stem="$1"
+  local expected_sha256="$2"
+  local target="$3"
+  local tmp=""
+  local actual_sha256=""
+
+  [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'Refusing invalid setup-script SHA-256 for %s.\n' "$object_stem" >&2
+    return 1
+  }
+  [[ -d "$(dirname "$target")" && ! -L "$(dirname "$target")" ]] || {
+    printf 'Refusing unsafe setup-script target directory: %s\n' "$target" >&2
+    return 1
+  }
+
+  tmp="$(mktemp "$target.tmp.XXXXXX")"
+  if ! gsutil cp "gs://${SCRIPTS_BUCKET}/$object_stem-$expected_sha256.sh" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  actual_sha256="$(sha256sum "$tmp" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    printf 'Setup-script SHA-256 mismatch for %s.\n' "$object_stem" >&2
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chown root:root "$tmp"
+  chmod 0755 "$tmp"
+  mv -f -- "$tmp" "$target"
+}
+
+install_setup_script run-consul "$RUN_CONSUL_FILE_HASH" /opt/consul/bin/run-consul.sh
+install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
+install_setup_script fetch-gcp-secret "$FETCH_GCP_SECRET_FILE_HASH" /opt/fetch-gcp-secret.sh
+install_setup_script configure-docker-gcp "$CONFIGURE_DOCKER_FILE_HASH" /opt/configure-docker-gcp.sh
 
 umask 077
 acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
@@ -135,13 +166,13 @@ systemctl restart systemd-resolved
 
 # These variables are passed in via Terraform template interpolation
 /opt/consul/bin/run-consul.sh --client \
-    --consul-token-file "$acl_dir/consul" \
     --cluster-tag-name "${CLUSTER_TAG_NAME}" \
     --enable-gossip-encryption \
     --gossip-encryption-key-file "$acl_dir/gossip" \
-    --dns-request-token-file "$acl_dir/consul-dns"
+    --dns-request-token-file "$acl_dir/consul-dns" \
+    --nomad-client-token-file "$acl_dir/consul"
 
-/opt/nomad/bin/run-nomad.sh --client --consul-token-file "$acl_dir/consul" --node-pool "${NODE_POOL}"
+/opt/nomad/bin/run-nomad.sh --client --consul-token-file "$acl_dir/consul" --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}"
 bootstrap_complete=true
 
 # Note: the clickhouse client is pre-installed in the cluster disk image at build

@@ -5,7 +5,6 @@ locals {
       grafana_otel_collector_token = var.grafana_otel_collector_token
       grafana_otlp_url             = var.grafana_otlp_url
       grafana_username             = var.grafana_username
-      consul_token                 = var.consul_token
 
       clickhouse_username = var.clickhouse_username
       clickhouse_password = var.clickhouse_password
@@ -86,12 +85,6 @@ variable "grafana_otlp_url" {
 variable "grafana_username" {
   type        = string
   description = "Grafana Cloud username. Required for default config, pass dummy value if using otel_collector_config_override."
-}
-
-variable "consul_token" {
-  type      = string
-  default   = ""
-  sensitive = true
 }
 
 variable "clickhouse_username" {

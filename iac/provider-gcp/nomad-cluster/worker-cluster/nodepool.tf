@@ -1,31 +1,32 @@
 locals {
   has_local_ssd = var.cache_disks.disk_type == "local-ssd"
   startup_script = templatefile("${path.module}/../scripts/start-client.sh", {
-    NOMAD_SERVER_TAG_NAME             = var.nomad_server_tag_name
-    SCRIPTS_BUCKET                    = var.cluster_setup_bucket_name
-    FC_KERNELS_BUCKET_NAME            = var.fc_kernels_bucket_name
-    FC_VERSIONS_BUCKET_NAME           = var.fc_versions_bucket_name
-    FC_ENV_PIPELINE_BUCKET_NAME       = var.fc_env_pipeline_bucket_name
-    FC_BUSYBOX_BUCKET_NAME            = var.fc_busybox_bucket_name
-    DOCKER_CONTEXTS_BUCKET_NAME       = var.docker_contexts_bucket_name
-    GCP_REGION                        = var.gcp_region
-    NOMAD_TOKEN_SECRET_NAME           = var.nomad_acl_token_secret_name
-    FETCH_GCP_SECRET_FILE_HASH        = var.file_hash["scripts/fetch-gcp-secret.sh"]
-    CONFIGURE_DOCKER_FILE_HASH        = var.file_hash["scripts/configure-docker-gcp.sh"]
-    RUN_NOMAD_FILE_HASH               = var.file_hash["scripts/run-nomad.sh"]
-    NFS_IP_ADDRESS                    = var.filestore_cache_enabled ? join(",", var.nfs_ip_addresses) : ""
-    NFS_MOUNT_PATH                    = var.nfs_mount_path
-    NFS_MOUNT_SUBDIR                  = var.nfs_mount_subdir
-    NFS_MOUNT_OPTS                    = var.nfs_mount_opts
-    USE_FILESTORE_CACHE               = var.filestore_cache_enabled
-    NODE_POOL                         = var.node_pool
-    BASE_HUGEPAGES_PERCENTAGE         = var.base_hugepages_percentage
-    CACHE_DISK_COUNT                  = var.cache_disks.count
-    LOCAL_SSD                         = local.has_local_ssd ? "true" : "false"
-    SWAP_SIZE_GB                      = var.boot_disk.swap_size_gb
-    SET_ORCHESTRATOR_VERSION_METADATA = var.set_orchestrator_version_metadata ? "true" : "false"
-    NODE_LABELS                       = join(",", var.node_labels)
-    PERSISTENT_VOLUME_TYPES           = var.persistent_volume_types
+    NOMAD_SERVER_TAG_NAME              = var.nomad_server_tag_name
+    CONSUL_SERVER_MIG_NAME             = var.consul_server_mig_name
+    CONSUL_SERVER_ROLE_LABEL           = var.consul_server_role_label
+    CONSUL_SERVER_SERVICE_ACCOUNT      = var.consul_server_service_account
+    SCRIPTS_BUCKET                     = var.cluster_setup_bucket_name
+    FC_KERNELS_BUCKET_NAME             = var.fc_kernels_bucket_name
+    FC_VERSIONS_BUCKET_NAME            = var.fc_versions_bucket_name
+    FC_ENV_PIPELINE_BUCKET_NAME        = var.fc_env_pipeline_bucket_name
+    FC_BUSYBOX_BUCKET_NAME             = var.fc_busybox_bucket_name
+    DOCKER_CONTEXTS_BUCKET_NAME        = var.docker_contexts_bucket_name
+    GCP_REGION                         = var.gcp_region
+    REFRESH_CONSUL_RESOLVERS_FILE_HASH = var.file_hash["scripts/refresh-consul-resolvers.sh"]
+    CONFIGURE_DOCKER_FILE_HASH         = var.file_hash["scripts/configure-docker-gcp.sh"]
+    RUN_NOMAD_FILE_HASH                = var.file_hash["scripts/run-nomad.sh"]
+    NFS_IP_ADDRESS                     = var.filestore_cache_enabled ? join(",", var.nfs_ip_addresses) : ""
+    NFS_MOUNT_PATH                     = var.nfs_mount_path
+    NFS_MOUNT_SUBDIR                   = var.nfs_mount_subdir
+    NFS_MOUNT_OPTS                     = var.nfs_mount_opts
+    USE_FILESTORE_CACHE                = var.filestore_cache_enabled
+    NODE_POOL                          = var.node_pool
+    BASE_HUGEPAGES_PERCENTAGE          = var.base_hugepages_percentage
+    CACHE_DISK_COUNT                   = var.cache_disks.count
+    LOCAL_SSD                          = local.has_local_ssd ? "true" : "false"
+    SWAP_SIZE_GB                       = var.boot_disk.swap_size_gb
+    NODE_LABELS                        = join(",", var.node_labels)
+    PERSISTENT_VOLUME_TYPES            = var.persistent_volume_types
   })
 }
 

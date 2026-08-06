@@ -264,11 +264,28 @@ jq '
 mv "${plan_json_file}.next" "${plan_json_file}"
 expect_fail "ACL secret version must be sensitive" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
 
-jq '.resource_changes[1].change.after_sensitive.secret_data = true' \
+jq '
+  .resource_changes[1].change.after_sensitive.secret_data = true
+  | .resource_changes[4].change.after_sensitive.result = false
+' "${plan_json_file}" >"${plan_json_file}.next"
+mv "${plan_json_file}.next" "${plan_json_file}"
+expect_fail "workload ACL seed must be sensitive" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
+
+jq '
+  .resource_changes[4].change.after_sensitive.result = true
+  | .resource_changes[5].change.after_sensitive.secret_data = false
+' "${plan_json_file}" >"${plan_json_file}.next"
+mv "${plan_json_file}.next" "${plan_json_file}"
+expect_fail "workload ACL secret version must be sensitive" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
+
+jq '.resource_changes[5].change.after_sensitive.secret_data = true' \
   "${plan_json_file}" >"${plan_json_file}.next"
 mv "${plan_json_file}.next" "${plan_json_file}"
 printf 'leaked value: consul-token-sentinel\n' >"${plan_text_file}"
 expect_fail "ACL material cannot appear in human plan output" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
+: >"${plan_text_file}"
+printf 'leaked value: consul-workload-token-sentinel\n' >"${plan_text_file}"
+expect_fail "workload ACL material cannot appear in human plan output" "${script_dir}/assert-foundation-plan.sh" ignored "${fake_terraform}" apply
 : >"${plan_text_file}"
 
 cat >"${plan_json_file}" <<'JSON'

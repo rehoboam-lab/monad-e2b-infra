@@ -33,8 +33,10 @@ for startup_script in "${startup_scripts[@]}"; do
   persisted_config="${fixture}/run-nomad.conf"
   acl_fixture="${fixture}/acl"
   printf '%s\n' 'autostart=true' 'environment=CONSUL_HTTP_TOKEN=stale' >"$persisted_config"
-  mkdir -p "$acl_fixture"
-  printf '%s' stale >"${acl_fixture}/token"
+  if [[ "$role" != "start-client" ]]; then
+    mkdir -p "$acl_fixture"
+    printf '%s' stale >"${acl_fixture}/token"
+  fi
 
   # Execute the exact gate embedded at the start of each template, then model
   # a Secret Manager/ADC failure. Rewrite only the test's Supervisor path so
@@ -44,7 +46,11 @@ for startup_script in "${startup_scripts[@]}"; do
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
     sed -n '/^bootstrap_complete=false$/,/^quiesce_orchestrators$/p' "$startup_script" \
       | sed 's#/etc/supervisor/conf.d/run-nomad.conf#${BOOT_TEST_SUPERVISOR_CONFIG}#g'
-    printf '%s\n' 'acl_dir="$BOOT_TEST_ACL_DIR"' 'false # simulated required-secret fetch failure'
+    if [[ "$role" == "start-client" ]]; then
+      printf '%s\n' 'false # simulated required boot failure'
+    else
+      printf '%s\n' 'acl_dir="$BOOT_TEST_ACL_DIR"' 'false # simulated required-secret fetch failure'
+    fi
   } >"$gate_script"
   chmod 0755 "$gate_script"
 
@@ -69,8 +75,16 @@ for startup_script in "${startup_scripts[@]}"; do
   fi
 
   quiesce_line="$(grep -n '^quiesce_orchestrators$' "$startup_script" | head -1 | cut -d: -f1)"
-  fetch_line="$(grep -n '/opt/fetch-gcp-secret.sh ' "$startup_script" | head -1 | cut -d: -f1)"
-  [[ -n "$quiesce_line" && -n "$fetch_line" ]] && ((quiesce_line < fetch_line))
+  if [[ "$role" == "start-client" ]]; then
+    if grep -F '/opt/fetch-gcp-secret.sh ' "$startup_script" >/dev/null; then
+      printf '%s must remain tokenless and must not fetch bootstrap secrets.\n' "$role" >&2
+      exit 1
+    fi
+    [[ -n "$quiesce_line" ]]
+  else
+    fetch_line="$(grep -n '/opt/fetch-gcp-secret.sh ' "$startup_script" | head -1 | cut -d: -f1)"
+    [[ -n "$quiesce_line" && -n "$fetch_line" ]] && ((quiesce_line < fetch_line))
+  fi
   grep -F 'bootstrap_complete=true' "$startup_script" >/dev/null
 done
 

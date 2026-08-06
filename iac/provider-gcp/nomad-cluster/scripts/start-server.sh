@@ -51,11 +51,41 @@ quiesce_orchestrators
 ulimit -n 65536
 export GOMAXPROCS='nproc'
 
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-consul-${RUN_CONSUL_FILE_HASH}.sh" /opt/consul/bin/run-consul.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-nomad-${RUN_NOMAD_FILE_HASH}.sh" /opt/nomad/bin/run-nomad.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/fetch-gcp-secret-${FETCH_GCP_SECRET_FILE_HASH}.sh" /opt/fetch-gcp-secret.sh
+install_setup_script() {
+  local object_stem="$1"
+  local expected_sha256="$2"
+  local target="$3"
+  local tmp=""
+  local actual_sha256=""
 
-chmod +x /opt/consul/bin/run-consul.sh /opt/nomad/bin/run-nomad.sh /opt/fetch-gcp-secret.sh
+  [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'Refusing invalid setup-script SHA-256 for %s.\n' "$object_stem" >&2
+    return 1
+  }
+  [[ -d "$(dirname "$target")" && ! -L "$(dirname "$target")" ]] || {
+    printf 'Refusing unsafe setup-script target directory: %s\n' "$target" >&2
+    return 1
+  }
+
+  tmp="$(mktemp "$target.tmp.XXXXXX")"
+  if ! gsutil cp "gs://${SCRIPTS_BUCKET}/$object_stem-$expected_sha256.sh" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  actual_sha256="$(sha256sum "$tmp" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    printf 'Setup-script SHA-256 mismatch for %s.\n' "$object_stem" >&2
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chown root:root "$tmp"
+  chmod 0755 "$tmp"
+  mv -f -- "$tmp" "$target"
+}
+
+install_setup_script run-consul "$RUN_CONSUL_FILE_HASH" /opt/consul/bin/run-consul.sh
+install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
+install_setup_script fetch-gcp-secret "$FETCH_GCP_SECRET_FILE_HASH" /opt/fetch-gcp-secret.sh
 
 # Keep the Nomad credential out of argv, logs, process-wide environment, and
 # Supervisor configuration. Populate the reviewed /run contract directly from
@@ -82,11 +112,32 @@ mv -f -- "$health_script_tmp" "$health_script_path"
 health_script_tmp=""
 
 acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
-/opt/fetch-gcp-secret.sh "${CONSUL_TOKEN_SECRET_NAME}" "$acl_dir/consul" uuid
+/opt/fetch-gcp-secret.sh "${CONSUL_TOKEN_CANDIDATE_SECRET_NAME}" "$acl_dir/consul-candidate" uuid
 /opt/fetch-gcp-secret.sh "${CONSUL_GOSSIP_SECRET_NAME}" "$acl_dir/gossip" consul-gossip-key
+/opt/fetch-gcp-secret.sh "${CONSUL_DNS_TOKEN_SECRET_NAME}" "$acl_dir/consul-dns" uuid
+/opt/fetch-gcp-secret.sh "${CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME}" "$acl_dir/consul-nomad-client" uuid
+/opt/fetch-gcp-secret.sh "${CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME}" "$acl_dir/consul-worker-autoscaler" uuid
 
-/opt/consul/bin/run-consul.sh --server --cluster-tag-name "${CLUSTER_TAG_NAME}" --consul-token-file "$acl_dir/consul" --enable-gossip-encryption --gossip-encryption-key-file "$acl_dir/gossip"
-/opt/nomad/bin/run-nomad.sh --server --num-servers "${NUM_SERVERS}" --consul-token-file "$acl_dir/consul" --nomad-token-file "$health_token_path"
+/opt/consul/bin/run-consul.sh \
+  --server \
+  --cluster-tag-name "${CLUSTER_TAG_NAME}" \
+  --consul-token-file "$acl_dir/consul-candidate" \
+  --consul-token-candidate-file "$acl_dir/consul-candidate" \
+  --consul-token-candidate-version "${CONSUL_TOKEN_CANDIDATE_SECRET_NAME}" \
+  --dns-request-token-file "$acl_dir/consul-dns" \
+  --dns-request-token-version "${CONSUL_DNS_TOKEN_SECRET_NAME}" \
+  --nomad-client-token-file "$acl_dir/consul-nomad-client" \
+  --nomad-client-token-version "${CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME}" \
+  --worker-autoscaler-token-file "$acl_dir/consul-worker-autoscaler" \
+  --worker-autoscaler-token-version "${CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME}" \
+  --enable-gossip-encryption \
+  --gossip-encryption-key-file "$acl_dir/gossip"
+/opt/nomad/bin/run-nomad.sh \
+  --server \
+  --num-servers "${NUM_SERVERS}" \
+  --nomad-server-legacy-tag-name "${CLUSTER_TAG_NAME}" \
+  --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" \
+  --nomad-token-file "$health_token_path"
 
 cat >/etc/supervisor/conf.d/nomad-voter-health.conf <<'EOF'
 [program:nomad-voter-health]

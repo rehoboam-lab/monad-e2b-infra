@@ -16,6 +16,11 @@ variable "cluster_tag_name" {
   type        = string
 }
 
+variable "nomad_server_tag_name" {
+  description = "Server-only GCE network tag used for Nomad retry_join."
+  type        = string
+}
+
 variable "cluster_name" {
   description = "Name of the cluster (used as base_instance_name and resource name prefix)."
   type        = string

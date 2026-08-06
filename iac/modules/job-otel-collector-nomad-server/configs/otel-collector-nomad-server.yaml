@@ -8,16 +8,22 @@ receivers:
             format: [prometheus]
           scrape_interval: 15s
 
+%{ if provider_name == "gcp" }
+          # Server Consul auto-advertise is deliberately disabled. Discover
+          # the private GCE server fleet with the API host's attached identity;
+          # no Consul token or static service-account key is involved.
+          gce_sd_configs:
+            - project: "${gcp_project_id}"
+              zone: "${gcp_zone}"
+              filter: '${nomad_server_discovery_filter}'
+              port: 4646
+              refresh_interval: 30s
+%{ endif }
+%{ if provider_name == "aws" }
           consul_sd_configs:
             - server: consul.service.consul:8500
-              services: ["nomad"]   # your Consul service name for servers
-
-          relabel_configs:
-            # Prefer the service address if present; force Nomad HTTP port
-            - source_labels: [__meta_consul_service_address]
-              regex: (.+)
-              target_label: __address__
-              replacement: $1:4646
+              services: ["nomad"]
+%{ endif }
 
 processors:
   filter/nomad_metrics:

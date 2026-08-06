@@ -10,14 +10,14 @@ die() {
   exit 1
 }
 
-[[ "$#" -eq 3 ]] || die 'expected SECRET_RESOURCE, OUTPUT_FILE, and SECRET_KIND'
+[[ "$#" -eq 3 ]] || die 'expected SECRET_VERSION_RESOURCE, OUTPUT_FILE, and SECRET_KIND'
 
-secret_resource="$1"
+secret_version_resource="$1"
 output_file="$2"
 secret_kind="$3"
 
-[[ "$secret_resource" =~ ^projects/[0-9A-Za-z._:-]+/secrets/[0-9A-Za-z._-]+$ ]] \
-  || die 'invalid Secret Manager resource name'
+[[ "$secret_version_resource" =~ ^projects/[0-9A-Za-z._:-]+/secrets/[0-9A-Za-z._-]+/versions/[1-9][0-9]*$ ]] \
+  || die 'invalid immutable Secret Manager version resource name'
 [[ "$output_file" == /* ]] || die 'output path must be absolute'
 [[ "$secret_kind" == "uuid" || "$secret_kind" == "consul-gossip-key" ]] \
   || die 'invalid secret kind'
@@ -33,7 +33,17 @@ secret_response="$work_dir/secret-response.json"
 curl_config="$work_dir/secret-manager.curl"
 secret_tmp="$work_dir/secret"
 
-if ! curl \
+curl_direct() {
+  env \
+    -u ALL_PROXY -u all_proxy \
+    -u HTTP_PROXY -u http_proxy \
+    -u HTTPS_PROXY -u https_proxy \
+    -u NO_PROXY -u no_proxy \
+    curl --disable --noproxy '*' "$@"
+}
+
+if ! curl_direct \
+  --proto '=http' \
   --fail \
   --silent \
   --show-error \
@@ -59,13 +69,13 @@ retry-all-errors
 connect-timeout = 5
 max-time = 30
 header = "Authorization: Bearer $access_token"
-url = "https://secretmanager.googleapis.com/v1/$secret_resource/versions/latest:access"
+url = "https://secretmanager.googleapis.com/v1/$secret_version_resource:access"
 output = "$secret_response"
 EOF
 unset access_token
 rm -f -- "$token_response"
 
-if ! curl --config "$curl_config"; then
+if ! curl_direct --proto '=https' --proto-redir '=https' --config "$curl_config"; then
   die 'secret access request failed'
 fi
 rm -f -- "$curl_config"

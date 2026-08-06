@@ -347,11 +347,11 @@ def is_safe_setup_object_replacement:
     and $resource.change.after.bucket == $resource.change.before.bucket
     and (
       $resource.change.before.name
-      | test("^" + $identity.script + "-[0-9a-f]{5}\\.sh$")
+      | test("^" + $identity.script + "-[0-9a-f]{5}([0-9a-f]{59})?\\.sh$")
     )
     and (
       $resource.change.after.name
-      | test("^" + $identity.script + "-[0-9a-f]{5}\\.sh$")
+      | test("^" + $identity.script + "-[0-9a-f]{64}\\.sh$")
     )
     and $resource.change.after.name != $resource.change.before.name;
 

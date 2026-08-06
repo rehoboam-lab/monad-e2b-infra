@@ -1,4 +1,8 @@
 job "otel-collector-nomad-server" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   type        = "service"
   node_pool   = "${node_pool}"
 
@@ -22,6 +26,7 @@ job "otel-collector-nomad-server" {
     }
 
     service {
+      provider = "nomad"
       name = "otel-collector-nomad-server"
 
       check {

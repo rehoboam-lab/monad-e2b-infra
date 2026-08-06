@@ -1,4 +1,8 @@
 job "orchestrator-${latest_orchestrator_job_id}" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   type = "system"
   node_pool = "${node_pool}"
 

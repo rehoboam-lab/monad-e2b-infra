@@ -3,25 +3,26 @@ locals {
 
   api_startup_script = templatefile("${path.module}/../modules/nodepool-api/scripts/start-api.sh", {
     CLUSTER_TAG_NAME             = var.cluster_tag_name
+    NOMAD_SERVER_TAG_NAME        = local.nomad_server_tag_name
     SCRIPTS_BUCKET               = var.cluster_setup_bucket_name
     FC_KERNELS_BUCKET_NAME       = var.fc_kernels_bucket_name
     FC_VERSIONS_BUCKET_NAME      = var.fc_versions_bucket_name
     FC_ENV_PIPELINE_BUCKET_NAME  = var.fc_env_pipeline_bucket_name
     DOCKER_CONTEXTS_BUCKET_NAME  = var.docker_contexts_bucket_name
     GCP_REGION                   = var.gcp_region
-    CONSUL_TOKEN_SECRET_NAME     = var.consul_acl_token_secret_name
+    CONSUL_TOKEN_SECRET_NAME     = local.consul_nomad_client_sync_secret_version_name
     FETCH_GCP_SECRET_FILE_HASH   = local.file_hash["scripts/fetch-gcp-secret.sh"]
     CONFIGURE_DOCKER_FILE_HASH   = local.file_hash["scripts/configure-docker-gcp.sh"]
     RUN_CONSUL_FILE_HASH         = local.file_hash["scripts/run-consul.sh"]
     RUN_NOMAD_FILE_HASH          = local.file_hash["scripts/run-nomad.sh"]
-    CONSUL_GOSSIP_SECRET_NAME    = local.consul_gossip_secret_name
-    CONSUL_DNS_TOKEN_SECRET_NAME = local.consul_dns_secret_name
+    CONSUL_GOSSIP_SECRET_NAME    = local.consul_gossip_secret_version_name
+    CONSUL_DNS_TOKEN_SECRET_NAME = local.consul_catalog_read_secret_version_name
     NODE_POOL                    = var.api_node_pool
   })
 }
 
 resource "google_secret_manager_secret_iam_member" "bootstrap_api" {
-  for_each = local.bootstrap_client_secret_names
+  for_each = local.bootstrap_client_secrets
 
   project   = var.gcp_project_id
   secret_id = each.value
@@ -29,8 +30,10 @@ resource "google_secret_manager_secret_iam_member" "bootstrap_api" {
   member    = "serviceAccount:${var.api_controller_service_account_email}"
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     google_secret_manager_secret.consul_gossip_encryption_key,
     google_secret_manager_secret.consul_dns_request_token,
+    google_secret_manager_secret.consul_nomad_client_sync_token,
   ]
 }
 
@@ -187,6 +190,7 @@ resource "google_compute_instance_template" "api" {
   }
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     terraform_data.os_login_operator_access_guard,
     google_secret_manager_secret_iam_member.bootstrap_api,
     google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],

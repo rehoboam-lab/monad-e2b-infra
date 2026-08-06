@@ -13,12 +13,12 @@ set -euo pipefail
 # Inspired by https://alestic.com/2010/12/ec2-user-data-output/
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-# Worker/build hosts deliberately have no Consul ACL, gossip, or DNS-secret
-# access. Keep any legacy Consul unit runtime-masked and remove Nomad from
-# Supervisor before doing boot work. A failed ADC fetch therefore leaves the
-# Nomad health endpoint down and the MIG unhealthy.
+# Worker/build hosts deliberately have no Consul ACL, gossip, DNS, or Nomad
+# management-secret access. Keep any legacy Consul unit runtime-masked and
+# remove Nomad from Supervisor before doing boot work. Any failed discovery or
+# startup step therefore leaves the Nomad health endpoint down and the MIG
+# unhealthy.
 bootstrap_complete=false
-acl_dir=""
 quiesce_orchestrators() {
   set +e
   supervisorctl stop nomad >/dev/null 2>&1
@@ -36,7 +36,6 @@ bootstrap_cleanup() {
   if [[ "$bootstrap_complete" != "true" ]]; then
     quiesce_orchestrators
   fi
-  [[ -z "$acl_dir" ]] || rm -rf -- "$acl_dir"
   exit "$status"
 }
 trap bootstrap_cleanup EXIT
@@ -248,20 +247,42 @@ mkdir -p $busybox_dir
 gcsfuse -o=allow_other,ro --file-mode 755 --config-file $fuse_config --implicit-dirs "${FC_BUSYBOX_BUCKET_NAME}" $busybox_dir
 
 # These variables are passed in via Terraform template interpolation
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-nomad-${RUN_NOMAD_FILE_HASH}.sh" /opt/nomad/bin/run-nomad.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/fetch-gcp-secret-${FETCH_GCP_SECRET_FILE_HASH}.sh" /opt/fetch-gcp-secret.sh
-gsutil cp "gs://${SCRIPTS_BUCKET}/configure-docker-gcp-${CONFIGURE_DOCKER_FILE_HASH}.sh" /opt/configure-docker-gcp.sh
+install -d -o root -g root -m 0755 /opt/e2b/bin
+install_setup_script() {
+  local object_stem="$1"
+  local expected_sha256="$2"
+  local target="$3"
+  local tmp=""
+  local actual_sha256=""
 
-chmod +x /opt/nomad/bin/run-nomad.sh /opt/fetch-gcp-secret.sh /opt/configure-docker-gcp.sh
+  [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'Refusing invalid setup-script SHA-256 for %s.\n' "$object_stem" >&2
+    return 1
+  }
+  [[ -d "$(dirname "$target")" && ! -L "$(dirname "$target")" ]] || {
+    printf 'Refusing unsafe setup-script target directory: %s\n' "$target" >&2
+    return 1
+  }
 
-umask 077
-acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
+  tmp="$(mktemp "$target.tmp.XXXXXX")"
+  if ! gsutil cp "gs://${SCRIPTS_BUCKET}/$object_stem-$expected_sha256.sh" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  actual_sha256="$(sha256sum "$tmp" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    printf 'Setup-script SHA-256 mismatch for %s.\n' "$object_stem" >&2
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chown root:root "$tmp"
+  chmod 0755 "$tmp"
+  mv -f -- "$tmp" "$target"
+}
 
-%{ if SET_ORCHESTRATOR_VERSION_METADATA == "true" }
-/opt/fetch-gcp-secret.sh "${NOMAD_TOKEN_SECRET_NAME}" "$acl_dir/nomad" uuid
-nomad_curl_config="$acl_dir/nomad-api.curl"
-printf 'header = "X-Nomad-Token: %s"\n' "$(<"$acl_dir/nomad")" >"$nomad_curl_config"
-%{ endif }
+install_setup_script run-nomad "$RUN_NOMAD_FILE_HASH" /opt/nomad/bin/run-nomad.sh
+install_setup_script configure-docker-gcp "$CONFIGURE_DOCKER_FILE_HASH" /opt/configure-docker-gcp.sh
+install_setup_script refresh-consul-resolvers "$REFRESH_CONSUL_RESOLVERS_FILE_HASH" /opt/e2b/bin/refresh-consul-resolvers.sh
 
 /opt/configure-docker-gcp.sh "${GCP_REGION}-docker.pkg.dev"
 
@@ -274,33 +295,49 @@ if [[ -f /etc/systemd/resolved.conf.d/gce-resolved.conf.disabled ]]; then
   mv /etc/systemd/resolved.conf.d/gce-resolved.conf.disabled /etc/systemd/resolved.conf.d/gce-resolved.conf
 fi
 
-PROJECT_ID=$(curl -fsS -H 'Metadata-Flavor: Google' \
-  http://metadata.google.internal/computeMetadata/v1/project/project-id)
-NOMAD_SERVER_IPS=$(gcloud compute instances list \
-  --project "$PROJECT_ID" \
-  --filter='status=RUNNING AND tags.items=${NOMAD_SERVER_TAG_NAME}' \
-  --format='value(networkInterfaces[0].networkIP)' \
-  | awk 'NF')
-if [[ -z "$NOMAD_SERVER_IPS" ]]; then
-  echo '- ERROR: no running Consul DNS server discovered through the server-only GCE tag' >&2
-  exit 1
-fi
-CONSUL_DNS_LINES=$(awk 'NF { print "DNS=" $1 ":8600" }' <<<"$NOMAD_SERVER_IPS")
-cat > /etc/systemd/resolved.conf.d/consul.conf <<EOF
-[Resolve]
-$CONSUL_DNS_LINES
-DNSSEC=false
-Domains=~consul
-EOF
 cat > /etc/systemd/resolved.conf.d/docker.conf <<EOF
 [Resolve]
 DNSStubListener=yes
 DNSStubListenerExtra=172.17.0.1
 EOF
-systemctl restart systemd-resolved
+
+cat >/etc/systemd/system/refresh-consul-resolvers.service <<EOF
+[Unit]
+Description=Refresh private Consul DNS upstreams from GCE
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/e2b/bin/refresh-consul-resolvers.sh ${GCP_REGION} ${CONSUL_SERVER_MIG_NAME} ${NOMAD_SERVER_TAG_NAME} ${CONSUL_SERVER_ROLE_LABEL} ${CONSUL_SERVER_SERVICE_ACCOUNT}
+EOF
+
+cat >/etc/systemd/system/refresh-consul-resolvers.timer <<'EOF'
+[Unit]
+Description=Periodically refresh private Consul DNS upstreams
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=refresh-consul-resolvers.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+/opt/e2b/bin/refresh-consul-resolvers.sh \
+  "${GCP_REGION}" \
+  "${CONSUL_SERVER_MIG_NAME}" \
+  "${NOMAD_SERVER_TAG_NAME}" \
+  "${CONSUL_SERVER_ROLE_LABEL}" \
+  "${CONSUL_SERVER_SERVICE_ACCOUNT}"
+systemctl enable --now refresh-consul-resolvers.timer
 
 for i in {1..60}; do
-  if host nomad.service.consul >/dev/null 2>&1; then
+  if host consul.service.consul >/dev/null 2>&1; then
     break
   fi
   if [[ "$i" -eq 60 ]]; then
@@ -382,45 +419,7 @@ overcommitment_hugepages=$(remove_decimal $overcommitment_hugepages)
 echo "- Allocating $overcommitment_hugepages huge pages ($overcommitment_hugepages_percentage%) for overcommitment"
 echo $overcommitment_hugepages >/proc/sys/vm/nr_overcommit_hugepages
 
-%{ if SET_ORCHESTRATOR_VERSION_METADATA == "true" }
-# Fetch the required scheduling pin directly from a GCE-discovered server
-# before registering this client. There is no unpinned Nomad-client window in
-# which a dev-shaped jobspec or a stale constraint could place allocations.
-FETCH_TIMEOUT_SECONDS=600
-FETCH_INTERVAL_SECONDS=5
-FETCH_MAX_ATTEMPTS=$((FETCH_TIMEOUT_SECONDS / FETCH_INTERVAL_SECONDS + 1))
-
-echo "[Fetching orchestrator version from Nomad servers (timeout: $${FETCH_TIMEOUT_SECONDS}s)]"
-ORCHESTRATOR_VERSION=""
-for i in $(seq 1 $FETCH_MAX_ATTEMPTS); do
-  ELAPSED=$(((i - 1) * FETCH_INTERVAL_SECONDS))
-  API_RESPONSE=""
-  for NOMAD_SERVER in $NOMAD_SERVER_IPS; do
-    API_RESPONSE=$(curl --config "$nomad_curl_config" -s --connect-timeout 5 --max-time 10 \
-      "http://$NOMAD_SERVER:4646/v1/var/nomad/jobs" 2>/dev/null || true)
-    [[ -z "$API_RESPONSE" ]] || break
-  done
-  if echo "$API_RESPONSE" | jq -e '.Items.latest_orchestrator_job_id' >/dev/null 2>&1; then
-    ORCHESTRATOR_VERSION=$(echo "$API_RESPONSE" | jq -r '.Items.latest_orchestrator_job_id')
-    echo "- Fetched orchestrator version: $ORCHESTRATOR_VERSION"
-    break
-  elif [ -n "$API_RESPONSE" ]; then
-    echo "- Invalid response from local Nomad API, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
-  else
-    echo "- No discovered Nomad server responded, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
-  fi
-  if [ $i -eq $FETCH_MAX_ATTEMPTS ]; then
-    echo "- ERROR: Could not fetch orchestrator version from Nomad servers after $${FETCH_TIMEOUT_SECONDS}s"
-    echo "- The node cannot start without the orchestrator version. Exiting..."
-    exit 1
-  fi
-  sleep $FETCH_INTERVAL_SECONDS
-done
-
-/opt/nomad/bin/run-nomad.sh --client --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}" --orchestrator-job-version "$ORCHESTRATOR_VERSION"
-%{ else }
 /opt/nomad/bin/run-nomad.sh --client --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}"
-%{ endif }
 
 bootstrap_complete=true
 

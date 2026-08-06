@@ -2,6 +2,11 @@ variable "prefix" {
   type = string
 }
 
+variable "environment" {
+  description = "Deployment environment. The role-split ACL bootstrap migration is restricted to dev."
+  type        = string
+}
+
 variable "bucket_prefix" {
   type = string
 }

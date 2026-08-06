@@ -155,7 +155,6 @@ locals {
     REDIS_TLS_CA_BASE64           = trimspace(data.google_secret_manager_secret_version.redis_tls_ca_base64.secret_data)
     REDIS_URL                     = local.redis_url
     GIN_MODE                      = "release"
-    CONSUL_TOKEN                  = module.init.consul_acl_token_secret
     DOMAIN_NAME                   = var.domain_name
     SHARED_CHUNK_CACHE_PATH       = module.cluster.shared_chunk_cache_path
     ORCHESTRATOR_SERVICES         = "orchestrator"
@@ -177,31 +176,40 @@ locals {
     {
       ALLOW_SANDBOX_INTERNAL_CIDRS = var.allow_sandbox_internal_cidrs
       SANDBOX_ORCHESTRATOR_IP      = "192.0.2.1"
+      # Network namespace slots are host-local. The host lifetime lock plus
+      # live /run/netns reconciliation is the isolation boundary; never send a
+      # slot-coordination bearer to a cross-host Consul HTTP endpoint.
+      USE_LOCAL_NAMESPACE_STORAGE = "true"
     },
   )
 
-  template_manager_env_vars = merge({
-    CONSUL_TOKEN                    = module.init.consul_acl_token_secret
-    GCP_SERVICE_ACCOUNT_EMAIL       = module.init.worker_build_service_account_email
-    GCP_PROJECT_ID                  = var.gcp_project_id
-    GCP_REGION                      = var.gcp_region
-    GCP_DOCKER_REPOSITORY_NAME      = google_artifact_registry_repository.custom_environments_repository.name
-    GCS_GRPC_CONNECTION_POOL_SIZE   = var.gcs_grpc_connection_pool_size != 0 ? tostring(var.gcs_grpc_connection_pool_size) : ""
-    API_SECRET                      = random_password.api_secret.result
-    ENVIRONMENT                     = var.environment
-    DOMAIN_NAME                     = var.domain_name
-    TEMPLATE_BUCKET_NAME            = module.init.fc_template_bucket_name
-    BUILD_CACHE_BUCKET_NAME         = module.init.fc_build_cache_bucket_name
-    OTEL_COLLECTOR_GRPC_ENDPOINT    = "localhost:${local.otel_collector_grpc_port}"
-    LOGS_COLLECTOR_ADDRESS          = "http://localhost:${local.logs_proxy_port}"
-    ORCHESTRATOR_SERVICES           = "template-manager"
-    REDIS_POOL_SIZE                 = "10"
-    SHARED_CHUNK_CACHE_PATH         = module.cluster.shared_chunk_cache_path
-    CLICKHOUSE_CONNECTION_STRING    = local.clickhouse_connection_string
-    DOCKERHUB_REMOTE_REPOSITORY_URL = var.remote_repository_enabled ? module.remote_repository[0].dockerhub_remote_repository_url : ""
-    GIN_MODE                        = "release"
-    LAUNCH_DARKLY_API_KEY           = trimspace(data.google_secret_manager_secret_version.launch_darkly_api_key.secret_data)
-  }, var.template_manager_env_vars)
+  template_manager_env_vars = merge(
+    {
+      GCP_SERVICE_ACCOUNT_EMAIL       = module.init.worker_build_service_account_email
+      GCP_PROJECT_ID                  = var.gcp_project_id
+      GCP_REGION                      = var.gcp_region
+      GCP_DOCKER_REPOSITORY_NAME      = google_artifact_registry_repository.custom_environments_repository.name
+      GCS_GRPC_CONNECTION_POOL_SIZE   = var.gcs_grpc_connection_pool_size != 0 ? tostring(var.gcs_grpc_connection_pool_size) : ""
+      API_SECRET                      = random_password.api_secret.result
+      ENVIRONMENT                     = var.environment
+      DOMAIN_NAME                     = var.domain_name
+      TEMPLATE_BUCKET_NAME            = module.init.fc_template_bucket_name
+      BUILD_CACHE_BUCKET_NAME         = module.init.fc_build_cache_bucket_name
+      OTEL_COLLECTOR_GRPC_ENDPOINT    = "localhost:${local.otel_collector_grpc_port}"
+      LOGS_COLLECTOR_ADDRESS          = "http://localhost:${local.logs_proxy_port}"
+      ORCHESTRATOR_SERVICES           = "template-manager"
+      REDIS_POOL_SIZE                 = "10"
+      SHARED_CHUNK_CACHE_PATH         = module.cluster.shared_chunk_cache_path
+      CLICKHOUSE_CONNECTION_STRING    = local.clickhouse_connection_string
+      DOCKERHUB_REMOTE_REPOSITORY_URL = var.remote_repository_enabled ? module.remote_repository[0].dockerhub_remote_repository_url : ""
+      GIN_MODE                        = "release"
+      LAUNCH_DARKLY_API_KEY           = trimspace(data.google_secret_manager_secret_version.launch_darkly_api_key.secret_data)
+    },
+    var.template_manager_env_vars,
+    {
+      USE_LOCAL_NAMESPACE_STORAGE = "true"
+    },
+  )
 
   docker_reverse_proxy_env_vars = merge({
     POSTGRES_CONNECTION_STRING = data.google_secret_manager_secret_version.postgres_connection_string.secret_data
@@ -267,6 +275,7 @@ locals {
 module "init" {
   source = "./init"
 
+  environment   = var.environment
   labels        = var.labels
   prefix        = var.prefix
   bucket_prefix = var.bucket_prefix
@@ -349,8 +358,10 @@ module "cluster" {
   clickhouse_job_constraint_prefix = var.clickhouse_job_constraint_prefix
   clickhouse_health_port           = var.clickhouse_health_port
 
-  consul_acl_token_secret_name = module.init.consul_acl_token_secret_name
-  nomad_acl_token_secret_name  = module.init.nomad_acl_token_secret_name
+  consul_acl_token_candidate_secret_version_name = module.init.consul_acl_token_candidate_secret_version_name
+  consul_acl_token_candidate_secret_name         = module.init.consul_acl_token_candidate_secret_name
+  nomad_acl_token_secret_name                    = module.init.nomad_acl_token_secret_name
+  nomad_acl_token_secret_version_name            = module.init.nomad_acl_token_secret_version_name
 
   filestore_cache_enabled     = var.filestore_cache_enabled
   filestore_cache_tier        = var.filestore_cache_tier
@@ -416,10 +427,16 @@ module "nomad" {
   gcp_region     = var.gcp_region
   gcp_zone       = var.gcp_zone
 
-  consul_acl_token_secret = module.init.consul_acl_token_secret
-  nomad_acl_token_secret  = module.init.nomad_acl_token_secret
-  nomad_port              = var.nomad_port
-  core_repository_name    = module.init.core_repository_name
+  consul_catalog_read_token      = module.cluster.consul_catalog_read_token
+  consul_worker_autoscaler_token = module.cluster.consul_worker_autoscaler_token
+  nomad_server_discovery_filter = (
+    module.cluster.consul_management_handoff_phase == "candidate"
+    ? module.cluster.nomad_server_label_discovery_filter
+    : module.cluster.nomad_server_name_discovery_filter
+  )
+  nomad_acl_token_secret = module.init.nomad_acl_token_secret
+  nomad_port             = var.nomad_port
+  core_repository_name   = module.init.core_repository_name
 
   # Clickhouse
   clickhouse_resources_cpu_count   = var.clickhouse_resources_cpu_count
