@@ -355,7 +355,7 @@ assert_private_evidence() {
   local path="$1"
   local permissions
   [[ -f "${path}" && ! -L "${path}" ]]
-  permissions="$(stat -f '%Lp' "${path}" 2>/dev/null || stat -c '%a' "${path}")"
+  permissions="$(stat -c '%a' "${path}" 2>/dev/null || stat -f '%Lp' "${path}")"
   [[ "${permissions}" == 600 ]]
 }
 
