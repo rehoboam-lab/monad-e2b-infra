@@ -11,7 +11,7 @@ resource "google_artifact_registry_repository_iam_member" "custom_environments_r
   location   = var.gcp_region
   repository = google_artifact_registry_repository.custom_environments_repository.repository_id
   role       = "roles/artifactregistry.repoAdmin"
-  member     = "serviceAccount:${module.init.service_account_email}"
+  member     = "serviceAccount:${module.init.worker_build_service_account_email}"
 }
 
 # The docker reverse proxy runs on the API pool and obtains short-lived ADC

@@ -127,6 +127,11 @@ variable "cluster_tag_name" {
   type        = string
 }
 
+variable "nomad_server_tag_name" {
+  description = "Server-only GCE network tag used by Nomad client retry_join discovery."
+  type        = string
+}
+
 # SERVICE ACCOUNT & AUTHENTICATION
 
 variable "google_service_account_email" {
@@ -143,28 +148,9 @@ variable "nomad_port" {
   type        = number
 }
 
-variable "nomad_acl_token_secret" {
-  description = "Nomad ACL token for client authentication"
+variable "nomad_acl_token_secret_name" {
+  description = "Secret Manager resource name for the Nomad ACL token fetched with attached-service-account ADC"
   type        = string
-  sensitive   = true
-}
-
-variable "consul_acl_token_secret" {
-  description = "Consul ACL token for client authentication"
-  type        = string
-  sensitive   = true
-}
-
-variable "consul_gossip_encryption_key_secret_data" {
-  description = "Consul gossip encryption key from secret manager"
-  type        = string
-  sensitive   = true
-}
-
-variable "consul_dns_request_token_secret_data" {
-  description = "Consul DNS request token from secret manager"
-  type        = string
-  sensitive   = true
 }
 
 variable "node_pool" {

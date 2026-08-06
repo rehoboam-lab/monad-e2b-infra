@@ -199,7 +199,7 @@ resource "google_storage_bucket" "fc_build_cache_bucket" {
 resource "google_storage_bucket_iam_member" "loki_storage_iam" {
   bucket = google_storage_bucket.loki_storage_bucket.name
   role   = "roles/storage.objectUser"
-  member = "serviceAccount:${google_service_account.infra_instances_service_account.email}"
+  member = "serviceAccount:${google_service_account.data_node_service_account.email}"
 }
 
 resource "google_storage_bucket_iam_member" "envs_docker_context_iam" {
@@ -218,6 +218,18 @@ resource "google_storage_bucket_iam_member" "instance_setup_bucket_iam" {
   bucket = google_storage_bucket.setup_bucket.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.infra_instances_service_account.email}"
+}
+
+resource "google_storage_bucket_iam_member" "instance_setup_bucket_nomad_server_iam" {
+  bucket = google_storage_bucket.setup_bucket.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.nomad_server_service_account.email}"
+}
+
+resource "google_storage_bucket_iam_member" "instance_setup_bucket_data_node_iam" {
+  bucket = google_storage_bucket.setup_bucket.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.data_node_service_account.email}"
 }
 
 resource "google_storage_bucket_iam_member" "fc_kernels_bucket_iam" {
@@ -259,7 +271,7 @@ resource "google_storage_bucket_iam_member" "fc_template_bucket_iam_reader" {
 resource "google_storage_bucket_iam_member" "clickhouse_backups_bucket_iam" {
   bucket = google_storage_bucket.clickhouse_backups_bucket.name
   role   = "roles/storage.objectUser"
-  member = "serviceAccount:${google_service_account.infra_instances_service_account.email}"
+  member = "serviceAccount:${google_service_account.data_node_service_account.email}"
 }
 
 resource "google_storage_bucket" "public_builds_storage_bucket" {

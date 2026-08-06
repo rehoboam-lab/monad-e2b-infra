@@ -3,6 +3,7 @@
 locals {
   build_base_hugepages_percentage  = 60
   client_base_hugepages_percentage = 80
+  nomad_server_tag_name            = "${var.prefix}nomad-server"
 
   nfs_mount_path   = "/orchestrator/shared-store"
   nfs_mount_subdir = "chunks-cache"
@@ -27,6 +28,7 @@ locals {
 
   file_hash = {
     "scripts/configure-docker-gcp.sh" = substr(filesha256("${path.module}/scripts/configure-docker-gcp.sh"), 0, 5)
+    "scripts/fetch-gcp-secret.sh"     = substr(filesha256("${path.module}/scripts/fetch-gcp-secret.sh"), 0, 5)
     "scripts/run-consul.sh"           = substr(filesha256("${path.module}/scripts/run-consul.sh"), 0, 5)
     "scripts/run-nomad.sh"            = substr(filesha256("${path.module}/scripts/run-nomad.sh"), 0, 5)
   }
@@ -256,20 +258,81 @@ resource "google_secret_manager_secret_version" "consul_dns_request_token" {
   secret_data = random_uuid.consul_dns_request_token.result
 }
 
+locals {
+  consul_gossip_secret_name = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-gossip-key"
+  consul_dns_secret_name    = "projects/${var.gcp_project_id}/secrets/${var.prefix}consul-dns-request-token"
+  bootstrap_server_secret_names = toset([
+    var.consul_acl_token_secret_name,
+    var.nomad_acl_token_secret_name,
+    local.consul_gossip_secret_name,
+  ])
+  bootstrap_client_secret_names = toset([
+    var.consul_acl_token_secret_name,
+    local.consul_gossip_secret_name,
+    local.consul_dns_secret_name,
+  ])
+  bootstrap_worker_secret_names = toset([
+    var.nomad_acl_token_secret_name,
+  ])
+}
+
+# Startup metadata carries only these non-secret resource names. Each node uses
+# its attached identity to retrieve the current enabled version at boot.
+resource "google_secret_manager_secret_iam_member" "bootstrap_server" {
+  for_each = local.bootstrap_server_secret_names
+
+  project   = var.gcp_project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.nomad_server_service_account_email}"
+
+  depends_on = [
+    google_secret_manager_secret.consul_gossip_encryption_key,
+    google_secret_manager_secret.consul_dns_request_token,
+  ]
+}
+
+resource "google_secret_manager_secret_iam_member" "bootstrap_worker" {
+  for_each = local.bootstrap_worker_secret_names
+
+  project   = var.gcp_project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.worker_build_service_account_email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "bootstrap_data" {
+  for_each = local.bootstrap_client_secret_names
+
+  project   = var.gcp_project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.data_node_service_account_email}"
+
+  depends_on = [
+    google_secret_manager_secret.consul_gossip_encryption_key,
+    google_secret_manager_secret.consul_dns_request_token,
+  ]
+}
+
+# The retained worker/build identity keeps only the common discovery and
+# telemetry permissions at the cluster boundary. Server, data, and API roles
+# receive their independent common grants from the foundation module.
 resource "google_project_iam_member" "network_viewer" {
   project = var.gcp_project_id
-  member  = "serviceAccount:${var.google_service_account_email}"
+  member  = "serviceAccount:${var.worker_build_service_account_email}"
   role    = "roles/compute.networkViewer"
 }
 
 resource "google_project_iam_member" "monitoring_editor" {
   project = var.gcp_project_id
-  member  = "serviceAccount:${var.google_service_account_email}"
+  member  = "serviceAccount:${var.worker_build_service_account_email}"
   role    = "roles/monitoring.editor"
 }
+
 resource "google_project_iam_member" "logging_writer" {
   project = var.gcp_project_id
-  member  = "serviceAccount:${var.google_service_account_email}"
+  member  = "serviceAccount:${var.worker_build_service_account_email}"
   role    = "roles/logging.logWriter"
 }
 
@@ -277,6 +340,7 @@ variable "setup_files" {
   type = map(string)
   default = {
     "scripts/configure-docker-gcp.sh" = "configure-docker-gcp",
+    "scripts/fetch-gcp-secret.sh"     = "fetch-gcp-secret",
     "scripts/run-nomad.sh"            = "run-nomad",
     "scripts/run-consul.sh"           = "run-consul"
   }
@@ -288,6 +352,13 @@ resource "google_storage_bucket_object" "setup_config_objects" {
   source          = "${path.module}/${each.key}"
   bucket          = var.cluster_setup_bucket_name
   deletion_policy = "ABANDON"
+
+  # Publish the new content-addressed object before Terraform forgets the old
+  # ABANDON generation. If an apply is interrupted between those operations,
+  # the staged-plan guard admits only the resulting state-only deposed cleanup.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 module "network" {
@@ -353,7 +424,7 @@ module "build_cluster" {
   gcp_project_id               = var.gcp_project_id
   gcp_region                   = var.gcp_region
   gcp_zone                     = var.gcp_zone
-  google_service_account_email = var.google_service_account_email
+  google_service_account_email = var.worker_build_service_account_email
 
   cluster_size     = each.value.cluster_size
   cache_disks      = each.value.cache_disks
@@ -370,13 +441,11 @@ module "build_cluster" {
   node_labels               = each.value.node_labels
   use_cloud_nat             = var.api_use_nat
 
-  cluster_tag_name                         = var.cluster_tag_name
-  node_pool                                = var.build_node_pool
-  nomad_port                               = var.nomad_port
-  consul_acl_token_secret                  = var.consul_acl_token_secret
-  nomad_acl_token_secret                   = var.nomad_acl_token_secret
-  consul_gossip_encryption_key_secret_data = google_secret_manager_secret_version.consul_gossip_encryption_key.secret_data
-  consul_dns_request_token_secret_data     = google_secret_manager_secret_version.consul_dns_request_token.secret_data
+  cluster_tag_name            = var.cluster_tag_name
+  nomad_server_tag_name       = local.nomad_server_tag_name
+  node_pool                   = var.build_node_pool
+  nomad_port                  = var.nomad_port
+  nomad_acl_token_secret_name = var.nomad_acl_token_secret_name
 
   docker_contexts_bucket_name = var.docker_contexts_bucket_name
   cluster_setup_bucket_name   = var.cluster_setup_bucket_name
@@ -402,9 +471,10 @@ module "build_cluster" {
   os_login_operator_access_confirmed = terraform_data.os_login_operator_access_guard.output
 
   depends_on = [
+    google_secret_manager_secret_iam_member.bootstrap_worker,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
+    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"]
   ]
 }
 
@@ -415,7 +485,7 @@ module "client_cluster" {
   gcp_project_id               = var.gcp_project_id
   gcp_region                   = var.gcp_region
   gcp_zone                     = var.gcp_zone
-  google_service_account_email = var.google_service_account_email
+  google_service_account_email = var.worker_build_service_account_email
 
   cluster_size     = each.value.cluster_size
   cache_disks      = each.value.cache_disks
@@ -437,13 +507,11 @@ module "client_cluster" {
   node_labels               = each.value.node_labels
   use_cloud_nat             = var.api_use_nat
 
-  cluster_tag_name                         = var.cluster_tag_name
-  node_pool                                = var.orchestrator_node_pool
-  nomad_port                               = var.nomad_port
-  consul_acl_token_secret                  = var.consul_acl_token_secret
-  nomad_acl_token_secret                   = var.nomad_acl_token_secret
-  consul_gossip_encryption_key_secret_data = google_secret_manager_secret_version.consul_gossip_encryption_key.secret_data
-  consul_dns_request_token_secret_data     = google_secret_manager_secret_version.consul_dns_request_token.secret_data
+  cluster_tag_name            = var.cluster_tag_name
+  nomad_server_tag_name       = local.nomad_server_tag_name
+  node_pool                   = var.orchestrator_node_pool
+  nomad_port                  = var.nomad_port
+  nomad_acl_token_secret_name = var.nomad_acl_token_secret_name
 
   docker_contexts_bucket_name = var.docker_contexts_bucket_name
   cluster_setup_bucket_name   = var.cluster_setup_bucket_name
@@ -470,8 +538,9 @@ module "client_cluster" {
   set_orchestrator_version_metadata = var.environment != "dev"
 
   depends_on = [
+    google_secret_manager_secret_iam_member.bootstrap_worker,
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
+    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"]
   ]
 }

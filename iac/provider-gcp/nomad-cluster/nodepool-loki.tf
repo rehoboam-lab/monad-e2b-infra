@@ -9,13 +9,13 @@ locals {
     FC_ENV_PIPELINE_BUCKET_NAME  = var.fc_env_pipeline_bucket_name
     DOCKER_CONTEXTS_BUCKET_NAME  = var.docker_contexts_bucket_name
     GCP_REGION                   = var.gcp_region
-    NOMAD_TOKEN                  = var.nomad_acl_token_secret
-    CONSUL_TOKEN                 = var.consul_acl_token_secret
+    CONSUL_TOKEN_SECRET_NAME     = var.consul_acl_token_secret_name
+    FETCH_GCP_SECRET_FILE_HASH   = local.file_hash["scripts/fetch-gcp-secret.sh"]
     CONFIGURE_DOCKER_FILE_HASH   = local.file_hash["scripts/configure-docker-gcp.sh"]
     RUN_CONSUL_FILE_HASH         = local.file_hash["scripts/run-consul.sh"]
     RUN_NOMAD_FILE_HASH          = local.file_hash["scripts/run-nomad.sh"]
-    CONSUL_GOSSIP_ENCRYPTION_KEY = google_secret_manager_secret_version.consul_gossip_encryption_key.secret_data
-    CONSUL_DNS_REQUEST_TOKEN     = google_secret_manager_secret_version.consul_dns_request_token.secret_data
+    CONSUL_GOSSIP_SECRET_NAME    = local.consul_gossip_secret_name
+    CONSUL_DNS_TOKEN_SECRET_NAME = local.consul_dns_secret_name
     NODE_POOL                    = var.loki_node_pool
   })
 }
@@ -122,7 +122,7 @@ resource "google_compute_instance_template" "loki" {
 
   # For a full list of oAuth 2.0 Scopes, see https://developers.google.com/identity/protocols/googlescopes
   service_account {
-    email = var.google_service_account_email
+    email = var.data_node_service_account_email
     scopes = [
       "userinfo-email",
       "compute-ro",
@@ -142,6 +142,7 @@ resource "google_compute_instance_template" "loki" {
 
   depends_on = [
     terraform_data.os_login_operator_access_guard,
+    google_secret_manager_secret_iam_member.bootstrap_data,
     google_storage_bucket_object.setup_config_objects,
   ]
 }

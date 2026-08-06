@@ -125,6 +125,78 @@ There is deliberately no workload destroy target.
 
 ## Guarded live-fleet replacement
 
+### ACL bootstrap channel
+
+Each GCE instance template contains only its role-minimal Secret Manager
+resource names. Servers receive Consul ACL, Nomad ACL, and Consul gossip;
+API, Loki, and ClickHouse receive Consul ACL, gossip, and DNS, never Nomad;
+worker/build clients receive no Consul material and fetch Nomad only inside
+the non-dev `SET_ORCHESTRATOR_VERSION_METADATA` branch that reads the version
+variable. Those clients discover the server-only GCE network tag through
+Nomad `server_join` with attached-identity ADC instead of joining through
+Consul. The startup path downloads the digest-named
+`fetch-gcp-secret` helper, obtains a short-lived access token from the attached
+service account, and reads `latest` through the Secret Manager API. It rejects
+non-canonical UUID ACL/DNS values and any gossip key that is not exactly 32
+decoded bytes, before either agent starts. It writes only mode-0600 files
+beneath a mode-0700 `/run/e2b-bootstrap-acl.*` directory and removes the
+directory after the role's Nomad/Consul configuration completes. ACL payloads must
+not appear in GCE metadata, rendered startup scripts, shell tracing, child
+process arguments, or bootstrap logs.
+
+The attached identities are split by trust boundary. `<prefix>nomad-server`
+receives only Nomad ACL, Consul ACL, and gossip; the retained
+`<prefix>infra-instances` worker/build identity receives only Nomad ACL;
+`<prefix>data-node` and `<prefix>api-controller` each receive only Consul ACL,
+gossip, and DNS. Common setup-bucket, Artifact Registry, logging, monitoring,
+and Compute discovery grants are attached only where the role consumes them;
+data storage and worker/build/signing permissions are not shared across
+identities. A failed ADC or secret read is a rollout-stopping error, not a
+reason to fall back to Terraform-rendered values.
+
+Every metadata startup begins by stopping Nomad, deleting its persisted
+Supervisor program, stopping and disabling Consul, and runtime-masking the
+Consul unit. Required secrets are then fetched and validated. `run-consul`
+unmasks and explicitly starts (but never enables) Consul; `run-nomad` writes
+`autostart=false`, reloads Supervisor, and explicitly starts Nomad while
+retaining `autorestart=true` for same-boot crashes. Any later startup failure
+repeats the quiesce operation. Because all MIG health checks use the Nomad
+health endpoint, a credential failure remains provider-visible as unhealthy
+instead of silently running with an old token. This ordering also applies to
+reboots with persisted configs; neither agent may autostart ahead of the
+credential gate.
+
+The ephemeral fetch files are removed, but the generated agent files are
+intentionally persistent because the services reload them after bootstrap.
+`/opt/consul/config/default.json` contains the Consul default management token
+and gossip key; it is mode 0600 and owned by the config-directory service user
+(`consul:consul` on the current image). `/opt/nomad/config/default.hcl`
+contains the Consul token only on roles that use Nomad's Consul integration,
+never the Nomad management token; worker/build configs instead contain the
+non-secret GCE discovery expression. The file is mode 0600 and owned by the
+corresponding service user (`nomad:nomad` on the current image). Operators
+must treat ACL-bearing copies as runtime secret files during forensics, image
+capture, and support collection.
+
+Setup scripts are content-addressed GCS objects with
+`create_before_destroy` and `deletion_policy = "ABANDON"`. If an interrupted
+replacement leaves an old deposed state entry, the next exact stage plan may
+perform only its deterministic state-only cleanup: the old entry must be an
+ABANDON delete beside one unchanged current object in the same bucket. The
+guard rejects changed/deleting current objects, mismatched buckets, unknown
+scripts, or destructive policies; the old cloud object remains retained.
+
+Roll this change through the normal guarded `server -> api -> worker -> build`
+replacement sequence. Before advancing each stage, inspect the exact template
+metadata, confirm the expected attached identity and secret-level IAM, and
+scan serial/user-data logs plus live process arguments for token material. Do
+not rotate the live ACLs as part of the template replacement. After every role
+is proven on the new path, perform Nomad and Consul ACL rotation as a separate
+reviewed operation, converge the new Secret Manager versions, prove all agents
+and jobs authenticate, then disable the superseded versions. Blindly replacing
+the Terraform seed/version without updating the live ACL systems will lock the
+fleet out.
+
 The current invited-beta fleet already exists. Network/OS Login adoption on that live topology is
 strictly serialized as `network`, `server`, `api`, `worker`, then `build`; this target is not a
 greenfield cluster creator or a replacement for the complete one-workcell release. A fresh private

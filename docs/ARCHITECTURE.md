@@ -570,10 +570,26 @@ flowchart TB
   ADC. Consul/Nomad ACL UUIDs are derived from sensitive random-password seeds
   so their Terraform resource IDs never contain active token material; legacy
   UUID generator state is scrubbed before any refresh and prior Secret Manager
-  versions are disabled during rotation. Control-plane bootstrap scripts never
+  versions are disabled during rotation. GCE startup metadata contains only
+  role-minimal Secret Manager resource names: API/Loki/ClickHouse never receive
+  the Nomad name, and workers fetch it only when non-dev version metadata is
+  required. At boot, the attached service account reads each current enabled
+  version through metadata-server ADC into a mode-0600 `/run` file. UUID values
+  and the exact 32-byte gossip key are validated before either agent starts;
+  missing IAM, metadata, malformed payloads, or unavailable Secret Manager all
+  fail closed. Bootstrap passes file paths rather than secret values to the
+  setup scripts, and child CLI/HTTP calls keep token material out of process
+  arguments. Control-plane bootstrap scripts never
   enable shell tracing on API or data-node user-data paths because their output
   is copied to persistent system and serial-console logs. They never emit ACL
-  tokens, remove their mode-0600 temporary token files, and treat an
+  tokens and remove their bounded temporary secret directories. The generated
+  files remain persistent by service requirement:
+  `/opt/consul/config/default.json` is mode 0600, owned by the Consul
+  config-directory user (`consul:consul` on the current image), and contains
+  the Consul management token plus gossip key;
+  `/opt/nomad/config/default.hcl` is mode 0600, owned by the Nomad
+  config-directory user (`nomad:nomad`), and contains Nomad's Consul token but
+  not the Nomad management token. Bootstrap treats an
   already-bootstrapped Nomad quorum as a successful replacement-host join.
   The GCP Nomad node-pool apply documents are created in a mode-0700 temporary
   directory outside the agent configuration directory and removed after each

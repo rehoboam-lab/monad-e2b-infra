@@ -235,8 +235,19 @@ variable "network_name" {
   type = string
 }
 
-variable "google_service_account_email" {
-  type = string
+variable "nomad_server_service_account_email" {
+  description = "Attached identity for the Nomad/Consul control-server pool."
+  type        = string
+}
+
+variable "worker_build_service_account_email" {
+  description = "Attached identity for Nomad worker and build pools."
+  type        = string
+}
+
+variable "data_node_service_account_email" {
+  description = "Attached identity for Loki and ClickHouse data pools."
+  type        = string
 }
 
 variable "api_controller_service_account_email" {
@@ -282,12 +293,14 @@ variable "fc_busybox_bucket_name" {
   description = "The name of the bucket to store the busybox binary"
 }
 
-variable "consul_acl_token_secret" {
-  type = string
+variable "consul_acl_token_secret_name" {
+  description = "Secret Manager resource name for the Consul ACL token fetched by GCE bootstrap through ADC."
+  type        = string
 }
 
-variable "nomad_acl_token_secret" {
-  type = string
+variable "nomad_acl_token_secret_name" {
+  description = "Secret Manager resource name for the Nomad ACL token fetched by GCE bootstrap through ADC."
+  type        = string
 }
 
 variable "nomad_port" {

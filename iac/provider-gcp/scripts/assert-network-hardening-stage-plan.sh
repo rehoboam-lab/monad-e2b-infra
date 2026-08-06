@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plan_path="${1:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE] [REFRESH_STAGE]}"
+plan_path="${1:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE] [REFRESH_STAGE] [PROJECT PREFIX]}"
 terraform_bin="${2:-terraform}"
-stage="${3:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE] [REFRESH_STAGE]}"
+stage="${3:?usage: assert-network-hardening-stage-plan.sh PLAN TERRAFORM_BIN STAGE [RECOVERY_STAGE] [REFRESH_STAGE] [PROJECT PREFIX]}"
 recovery_stage="${4:-}"
 refresh_stage="${5:-}"
+expected_project="${6:-${GCP_PROJECT_ID:-}}"
+expected_prefix="${7:-${PREFIX:-}}"
+
+[[ "${expected_project}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || {
+  printf 'Expected GCP project is required and must be canonical.\n' >&2
+  exit 2
+}
+[[ "${expected_prefix}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?-$ ]] || {
+  printf 'Expected infrastructure prefix is required and must end in a hyphen.\n' >&2
+  exit 2
+}
 
 case "${stage}" in
   network) previous='disabled' ;;
@@ -230,6 +241,8 @@ case "${stage}" in
     ;;
   server)
     expected_mutations='[
+      "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/fetch-gcp-secret.sh\"]",
+      "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-consul.sh\"]",
       "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]",
       "module.cluster.google_compute_health_check.server_nomad_check",
       "module.cluster.google_compute_instance_template.server",
@@ -260,6 +273,200 @@ case "${stage}" in
     ;;
 esac
 
+server_member="serviceAccount:${expected_prefix}nomad-server@${expected_project}.iam.gserviceaccount.com"
+worker_member="serviceAccount:${expected_prefix}infra-instances@${expected_project}.iam.gserviceaccount.com"
+data_member="serviceAccount:${expected_prefix}data-node@${expected_project}.iam.gserviceaccount.com"
+api_member="serviceAccount:${expected_prefix}api-controller@${expected_project}.iam.gserviceaccount.com"
+secret_base="projects/${expected_project}/secrets/${expected_prefix}"
+
+server_iam_expected="$(jq -cn \
+  --arg base "${secret_base}" \
+  --arg member "${server_member}" '
+    ["consul-secret-id", "nomad-secret-id", "consul-gossip-key"]
+    | map(
+        ($base + .) as $secret
+        | {
+            address:("module.cluster.google_secret_manager_secret_iam_member.bootstrap_server[" + ($secret | @json) + "]"),
+            project:($base | split("/")[1]),
+            secret_id:$secret,
+            member:$member
+          }
+      )
+  ')"
+worker_iam_expected="$(jq -cn \
+  --arg base "${secret_base}" \
+  --arg member "${worker_member}" '
+    ["nomad-secret-id"]
+    | map(
+        ($base + .) as $secret
+        | {
+            address:("module.cluster.google_secret_manager_secret_iam_member.bootstrap_worker[" + ($secret | @json) + "]"),
+            project:($base | split("/")[1]),
+            secret_id:$secret,
+            member:$member
+          }
+      )
+  ')"
+data_iam_expected="$(jq -cn \
+  --arg base "${secret_base}" \
+  --arg member "${data_member}" '
+    ["consul-secret-id", "consul-gossip-key", "consul-dns-request-token"]
+    | map(
+        ($base + .) as $secret
+        | {
+            address:("module.cluster.google_secret_manager_secret_iam_member.bootstrap_data[" + ($secret | @json) + "]"),
+            project:($base | split("/")[1]),
+            secret_id:$secret,
+            member:$member
+          }
+      )
+  ')"
+api_iam_expected="$(jq -cn \
+  --arg base "${secret_base}" \
+  --arg member "${api_member}" '
+    ["consul-secret-id", "consul-gossip-key", "consul-dns-request-token"]
+    | map(
+        ($base + .) as $secret
+        | {
+            address:("module.cluster.google_secret_manager_secret_iam_member.bootstrap_api[" + ($secret | @json) + "]"),
+            project:($base | split("/")[1]),
+            secret_id:$secret,
+            member:$member
+          }
+      )
+  ')"
+
+case "${stage}" in
+  network)
+    bootstrap_iam_expected='[]'
+    ;;
+  server)
+    bootstrap_iam_expected="$(jq -c 'map(. + {shape:"create-or-no-op"})' <<<"${server_iam_expected}")"
+    ;;
+  api)
+    bootstrap_iam_expected="$(jq -cn \
+      --argjson server "${server_iam_expected}" \
+      --argjson api "${api_iam_expected}" \
+      '($server | map(. + {shape:"no-op"})) + ($api | map(. + {shape:"create-or-no-op"}))')"
+    ;;
+  worker)
+    bootstrap_iam_expected="$(jq -cn \
+      --argjson server "${server_iam_expected}" \
+      --argjson api "${api_iam_expected}" \
+      --argjson worker "${worker_iam_expected}" \
+      '($server + $api | map(. + {shape:"no-op"})) + ($worker | map(. + {shape:"create-or-no-op"}))')"
+    ;;
+  build)
+    bootstrap_iam_expected="$(jq -cn \
+      --argjson server "${server_iam_expected}" \
+      --argjson api "${api_iam_expected}" \
+      --argjson worker "${worker_iam_expected}" \
+      --argjson data "${data_iam_expected}" \
+      '($server + $api + $worker | map(. + {shape:"no-op"})) + ($data | map(. + {shape:"create-or-no-op"}))')"
+    ;;
+esac
+
+bootstrap_iam_changes="$(jq -cS '
+  [
+    .resource_changes[]?
+    | select(.mode == "managed")
+    | select(.address | startswith("module.cluster.google_secret_manager_secret_iam_member.bootstrap_"))
+  ]
+' <<<"${plan_json}")"
+
+jq -e \
+  --argjson expected "${bootstrap_iam_expected}" '
+    def exact($value; $want):
+      $value != null
+      and $value.project == $want.project
+      and $value.secret_id == $want.secret_id
+      and $value.role == "roles/secretmanager.secretAccessor"
+      and $value.member == $want.member;
+    . as $actual
+    | ($actual | length) == ($expected | length)
+    and all($expected[];
+      . as $want
+      | [$actual[] | select(.address == $want.address)] as $matches
+      | ($matches | length) == 1
+        and $matches[0].type == "google_secret_manager_secret_iam_member"
+        and exact($matches[0].change.after; $want)
+        and (
+          if $want.shape == "no-op" then
+            $matches[0].change.actions == ["no-op"]
+            and exact($matches[0].change.before; $want)
+          else
+            (
+              $matches[0].change.actions == ["create"]
+              and $matches[0].change.before == null
+            )
+            or (
+              $matches[0].change.actions == ["no-op"]
+              and exact($matches[0].change.before; $want)
+            )
+          end
+        )
+    )
+  ' <<<"${bootstrap_iam_changes}" >/dev/null || {
+  printf 'Refusing %s stage: bootstrap IAM is not the exact project, identity, secret set, count, and safe stage shape.\n' \
+    "${stage}" >&2
+  exit 1
+}
+
+# A create-before-destroy content-addressed object can remain deposed if a
+# prior apply is interrupted after publishing the new object. ABANDON makes
+# Terraform's pending delete state-only. Admit that cleanup in the next exact
+# stage only when the current object is a byte-for-byte no-op in the same
+# bucket and both object names/sources remain bound to the reviewed script.
+jq -e '
+  def object_contract($address):
+    if $address == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/fetch-gcp-secret.sh\"]" then
+      {name:"fetch-gcp-secret", source:"nomad-cluster/scripts/fetch-gcp-secret.sh"}
+    elif $address == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-consul.sh\"]" then
+      {name:"run-consul", source:"nomad-cluster/scripts/run-consul.sh"}
+    elif $address == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]" then
+      {name:"run-nomad", source:"nomad-cluster/scripts/run-nomad.sh"}
+    else null end;
+  def current_for($plan; $address):
+    [
+      $plan.resource_changes[]?
+      | select(.address == $address and .deposed == null)
+    ];
+  . as $plan
+  | [
+      $plan.resource_changes[]?
+      | select(.mode == "managed")
+      | select(.deposed != null)
+      | select(.address | startswith("module.cluster.google_storage_bucket_object.setup_config_objects["))
+    ] as $deposed
+  | ($deposed | length) <= 3
+  and ([$deposed[].address] | unique | length) == ($deposed | length)
+  and all($deposed[];
+    . as $old
+    | object_contract($old.address) as $contract
+    | current_for($plan; $old.address) as $current
+    | $contract != null
+      and ($old.deposed | test("^[0-9a-f]{8}$"))
+      and $old.type == "google_storage_bucket_object"
+      and $old.change.actions == ["delete"]
+      and $old.change.after == null
+      and $old.change.before.deletion_policy == "ABANDON"
+      and ($old.change.before.name | test("^" + $contract.name + "-[0-9a-f]{5}\\.sh$"))
+      and ($old.change.before.source | endswith($contract.source))
+      and ($current | length) == 1
+      and $current[0].type == "google_storage_bucket_object"
+      and $current[0].change.actions == ["no-op"]
+      and $current[0].change.before == $current[0].change.after
+      and $current[0].change.after.deletion_policy == "ABANDON"
+      and $current[0].change.after.bucket == $old.change.before.bucket
+      and ($current[0].change.after.name | test("^" + $contract.name + "-[0-9a-f]{5}\\.sh$"))
+      and ($current[0].change.after.source | endswith($contract.source))
+  )
+' <<<"${plan_json}" >/dev/null || {
+  printf 'Refusing %s stage: deposed setup object is not an exact ABANDON state-only cleanup beside one current no-op.\n' \
+    "${stage}" >&2
+  exit 1
+}
+
 actual_mutations="$(jq -cS \
   --arg guard "${guard_address}" \
   --arg completion "${completion_address}" \
@@ -269,6 +476,14 @@ actual_mutations="$(jq -cS \
       | select(.mode == "managed")
       | select(.change.actions != ["no-op"] and .change.actions != ["read"])
       | select(.address != $guard and .address != $completion and .address != $marker)
+      | select(.address | startswith("module.cluster.google_secret_manager_secret_iam_member.bootstrap_") | not)
+      | select(
+          (
+            .deposed != null
+            and (.address | startswith("module.cluster.google_storage_bucket_object.setup_config_objects["))
+          )
+          | not
+        )
       | .address
     ]
     | sort
@@ -293,6 +508,7 @@ if [[ "${stage}" == "server" ]]; then
           .address
           == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]"
         )
+      | select(.deposed == null)
     ] as $matches
     | ($matches | length) == 1
       and $matches[0].mode == "managed"
@@ -397,6 +613,42 @@ if [[ "${stage}" == "server" ]]; then
     printf 'Refusing server stage: local-voter health, substitute rollout, or zone-surge invariants are unsafe.\n' >&2
     exit 1
   }
+  for setup_object in \
+    'fetch-gcp-secret|scripts/fetch-gcp-secret.sh' \
+    'run-consul|scripts/run-consul.sh'; do
+    object_name="${setup_object%%|*}"
+    object_source="${setup_object#*|}"
+    object_address="module.cluster.google_storage_bucket_object.setup_config_objects[\"${object_source}\"]"
+    jq -e \
+      --arg address "${object_address}" \
+      --arg object_name "${object_name}" \
+      --arg source "nomad-cluster/${object_source}" '
+        [.resource_changes[]? | select(.address == $address and .deposed == null)] as $matches
+        | ($matches | length) == 1
+          and $matches[0].mode == "managed"
+          and $matches[0].type == "google_storage_bucket_object"
+          and (
+            $matches[0].change.actions == ["no-op"]
+            or (
+              (
+                $matches[0].change.actions == ["create"]
+                or $matches[0].change.actions == ["create", "delete"]
+                or $matches[0].change.actions == ["delete", "create"]
+              )
+              and (
+                ($matches[0].change.actions == ["create"] and $matches[0].change.before == null)
+                or ($matches[0].change.before.name | test("^" + $object_name + "-[0-9a-f]{5}\\.sh$"))
+              )
+              and ($matches[0].change.after.name | test("^" + $object_name + "-[0-9a-f]{5}\\.sh$"))
+              and ($matches[0].change.after.source | endswith($source))
+            )
+          )
+      ' <<<"${plan_json}" >/dev/null || {
+      printf 'Refusing server stage: bootstrap object %s is missing or unsafe.\n' \
+        "${object_name}" >&2
+      exit 1
+    }
+  done
 fi
 
 if [[ "${stage}" == "network" ]]; then
@@ -451,40 +703,51 @@ fi
 # The cumulative dependency chain pulls every completed template into the
 # exact-stage plan while keeping future pools out. Re-prove OS Login intent for
 # all prior/current templates and reject any mutation outside the current pool.
-template_expectations="$(jq -cn --arg stage "${stage}" '
+template_expectations="$(jq -cn \
+  --arg stage "${stage}" \
+  --arg project "${expected_project}" \
+  --arg prefix "${expected_prefix}" '
   if $stage == "network" then []
   elif $stage == "server" then [
-    {address:"module.cluster.google_compute_instance_template.server"}
+    {address:"module.cluster.google_compute_instance_template.server",identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"),server:true}
   ]
   elif $stage == "api" then [
-    {address:"module.cluster.google_compute_instance_template.server"},
-    {address:"module.cluster.google_compute_instance_template.api"}
+    {address:"module.cluster.google_compute_instance_template.server",identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"),server:true},
+    {address:"module.cluster.google_compute_instance_template.api",identity:($prefix + "api-controller@" + $project + ".iam.gserviceaccount.com")}
   ]
   elif $stage == "worker" then [
-    {address:"module.cluster.google_compute_instance_template.server"},
-    {address:"module.cluster.google_compute_instance_template.api"},
-    {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template"}
+    {address:"module.cluster.google_compute_instance_template.server",identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"),server:true},
+    {address:"module.cluster.google_compute_instance_template.api",identity:($prefix + "api-controller@" + $project + ".iam.gserviceaccount.com")},
+    {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template",identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")}
   ]
   else [
-    {address:"module.cluster.google_compute_instance_template.server"},
-    {address:"module.cluster.google_compute_instance_template.api"},
-    {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template"},
-    {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template"},
-    {address:"module.cluster.google_compute_instance_template.loki"},
-    {address:"module.cluster.google_compute_instance_template.clickhouse"}
+    {address:"module.cluster.google_compute_instance_template.server",identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"),server:true},
+    {address:"module.cluster.google_compute_instance_template.api",identity:($prefix + "api-controller@" + $project + ".iam.gserviceaccount.com")},
+    {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template",identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+    {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template",identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+    {address:"module.cluster.google_compute_instance_template.loki",identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")},
+    {address:"module.cluster.google_compute_instance_template.clickhouse",identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")}
   ]
   end
 ')"
-jq -e --argjson expected "${template_expectations}" '
+jq -e \
+  --argjson expected "${template_expectations}" \
+  --arg server_tag "${expected_prefix}nomad-server" '
   [
     $expected[] as $want
     | [ .resource_changes[]? | select(.address == $want.address) ] as $matches
     | ($matches | length) == 1
       and $matches[0].change.after.metadata["enable-oslogin"] == "TRUE"
+      and ($matches[0].change.after.service_account | length) == 1
+      and $matches[0].change.after.service_account[0].email == $want.identity
+      and (
+        ($want.server // false) == false
+        or ($matches[0].change.after.tags | index($server_tag)) != null
+      )
   ]
   | all
 ' <<<"${plan_json}" >/dev/null || {
-  printf 'Refusing %s stage: cumulative OS Login template intent is incomplete.\n' \
+  printf 'Refusing %s stage: cumulative template identity, server discovery tag, or OS Login intent is incomplete.\n' \
     "${stage}" >&2
   exit 1
 }

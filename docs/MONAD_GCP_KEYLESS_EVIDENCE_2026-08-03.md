@@ -89,9 +89,13 @@ The audited GCP runtime is keyless: GCE consumers use attached-service-account
 ADC, with zero user-managed GCP service-account keys and zero observed runtime
 key files or log markers.
 
-This result does not close the separate historical Nomad ACL argument exposure
-in serial-console logs from the pre-hardening startup path. The next security
-change must move ACL retrieval to Secret Manager through the attached service
-account and rotate those ACL credentials after the new boot path is deployed.
-That credential is not a GCP service-account key and does not change the
-keyless-GCP result above.
+This result does not itself close the separate historical Nomad ACL argument
+exposure in serial-console logs from the pre-hardening startup path. The source
+remediation changes GCE metadata to carry only Secret Manager resource names,
+retrieves ACL material at boot through the attached service account, and keeps
+payloads out of child process arguments and logs. It is not evidence of live
+remediation until every role has completed the guarded replacement and runtime
+checks. Rotate the affected Nomad and Consul ACL credentials only after that
+deployment, as a separate reviewed operation, and disable superseded versions
+after convergence. Those credentials are not GCP service-account keys and do
+not change the keyless-GCP result above.

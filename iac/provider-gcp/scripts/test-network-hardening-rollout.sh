@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export GCP_PROJECT_ID="monad-code"
+export PREFIX="e2b-"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 provider_root="$(cd "${script_dir}/.." && pwd)"
 repo_root="$(cd "${provider_root}/../.." && pwd)"
@@ -41,12 +44,21 @@ grep -F 'from = terraform_data.network_hardening_rollout_completion' \
   "${cluster_source}" >/dev/null
 grep -F 'from = terraform_data.network_hardening_rollout_stage' \
   "${cluster_source}" >/dev/null
+grep -A18 -F 'resource "google_storage_bucket_object" "setup_config_objects"' \
+  "${cluster_source}" | grep -F 'create_before_destroy = true' >/dev/null
 for stage in network server api worker build; do
   grep -F "resource \"terraform_data\" \"network_hardening_rollout_completion_${stage}\"" \
     "${cluster_source}" >/dev/null
   grep -F "resource \"terraform_data\" \"network_hardening_rollout_stage_${stage}\"" \
     "${cluster_source}" >/dev/null
 done
+
+expect_fail "saved plan IAM is bound to the externally selected project" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server.plan" "${fake_terraform}" server '' other-project e2b-
+expect_fail "saved plan IAM is bound to the externally selected prefix" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server.plan" "${fake_terraform}" server '' monad-code other-
 for dependency in \
   terraform_data.network_hardening_rollout_stage_network \
   terraform_data.network_hardening_rollout_stage_server \
@@ -97,7 +109,33 @@ grep -F 'preserving the shared lease and private recovery directory' \
 make_plan() {
   local stage="$1"
   local output="$2"
-  jq -n --arg stage "${stage}" '
+  jq -n \
+    --arg stage "${stage}" \
+    --arg project "${GCP_PROJECT_ID}" \
+    --arg prefix "${PREFIX}" '
+    def iam_change($resource; $secret; $member; $actions):
+      {
+        address:("module.cluster.google_secret_manager_secret_iam_member." + $resource + "[" + ($secret | @json) + "]"),
+        mode:"managed",
+        type:"google_secret_manager_secret_iam_member",
+        change:{
+          actions:$actions,
+          before:(
+            if $actions == ["create"] then null else {
+              project:$project,
+              secret_id:$secret,
+              role:"roles/secretmanager.secretAccessor",
+              member:$member
+            } end
+          ),
+          after:{
+            project:$project,
+            secret_id:$secret,
+            role:"roles/secretmanager.secretAccessor",
+            member:$member
+          }
+        }
+      };
     {network:1,server:2,api:3,worker:4,build:5} as $rank
     | ["network","server","api","worker","build"] as $stages
     | {
@@ -143,13 +181,22 @@ make_plan() {
         ]
       } as $mutations
     | [
-        {address:"module.cluster.google_compute_instance_template.server", role_rank:2},
-        {address:"module.cluster.google_compute_instance_template.api", role_rank:3},
-        {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template", role_rank:4},
-        {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template", role_rank:5},
-        {address:"module.cluster.google_compute_instance_template.loki", role_rank:5},
-        {address:"module.cluster.google_compute_instance_template.clickhouse", role_rank:5}
+        {address:"module.cluster.google_compute_instance_template.server", role_rank:2, identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"), server:true},
+        {address:"module.cluster.google_compute_instance_template.api", role_rank:3, identity:($prefix + "api-controller@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template", role_rank:4, identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template", role_rank:5, identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.google_compute_instance_template.loki", role_rank:5, identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.google_compute_instance_template.clickhouse", role_rank:5, identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")}
       ] as $templates
+    | ("projects/" + $project + "/secrets/" + $prefix) as $secret_base
+    | ("serviceAccount:" + $prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com") as $server_member
+    | ("serviceAccount:" + $prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com") as $worker_member
+    | ("serviceAccount:" + $prefix + "data-node@" + $project + ".iam.gserviceaccount.com") as $data_member
+    | ("serviceAccount:" + $prefix + "api-controller@" + $project + ".iam.gserviceaccount.com") as $api_member
+    | ["consul-secret-id", "nomad-secret-id", "consul-gossip-key"] as $server_secrets
+    | ["nomad-secret-id"] as $worker_secrets
+    | ["consul-secret-id", "consul-gossip-key", "consul-dns-request-token"] as $data_secrets
+    | ["consul-secret-id", "consul-gossip-key", "consul-dns-request-token"] as $api_secrets
     | {
         format_version:"1.2",
         errored:false,
@@ -208,23 +255,82 @@ make_plan() {
                   change:{
                     actions:(if ($mutations[$stage] | index($template.address)) then ["create","delete"] else ["no-op"] end),
                     before:{metadata:{}},
-                    after:{metadata:{"enable-oslogin":"TRUE"}}
+                    after:{
+                      metadata:{"enable-oslogin":"TRUE"},
+                      service_account:[{email:$template.identity}],
+                      tags:(if ($template.server // false) then [($prefix + "nomad-server")] else [] end)
+                    }
                   }
                 }
             ]
           + (
               if $rank[$stage] >= $rank.server then [
-                {
-                  address:"module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]",
-                  mode:"managed",
-                  type:"google_storage_bucket_object",
-                  change:{
-                    actions:(if $stage == "server" then ["delete","create"] else ["no-op"] end),
-                    before:{name:"run-nomad-11111.sh",source:"/repo/nomad-cluster/scripts/run-nomad.sh"},
-                    after:{name:"run-nomad-22222.sh",source:"/repo/nomad-cluster/scripts/run-nomad.sh"}
+                "run-nomad", "run-consul", "fetch-gcp-secret"
+                | . as $object
+                | {
+                    address:("module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/" + $object + ".sh\"]"),
+                    mode:"managed",
+                    type:"google_storage_bucket_object",
+                    change:{
+                      actions:(if $stage == "server" then ["delete","create"] else ["no-op"] end),
+                      before:{
+                        bucket:"monad-code-instance-setup",
+                        deletion_policy:"ABANDON",
+                        name:($object + (if $stage == "server" then "-11111.sh" else "-22222.sh" end)),
+                        source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
+                      },
+                      after:{
+                        bucket:"monad-code-instance-setup",
+                        deletion_policy:"ABANDON",
+                        name:($object + "-22222.sh"),
+                        source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
+                      }
+                    }
                   }
-                }
               ] else [] end
+            )
+          + (
+              if $stage == "network" then []
+              elif $stage == "server" then [
+                $server_secrets[]
+                | iam_change("bootstrap_server"; $secret_base + .; $server_member; ["create"])
+              ]
+              elif $stage == "api" then (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; $secret_base + .; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; $secret_base + .; $api_member; ["create"])
+                ]
+              )
+              elif $stage == "worker" then (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; $secret_base + .; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; $secret_base + .; $api_member; ["no-op"])
+                ] + [
+                  $worker_secrets[]
+                  | iam_change("bootstrap_worker"; $secret_base + .; $worker_member; ["create"])
+                ]
+              )
+              else (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; $secret_base + .; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; $secret_base + .; $api_member; ["no-op"])
+                ] + [
+                  $worker_secrets[]
+                  | iam_change("bootstrap_worker"; $secret_base + .; $worker_member; ["no-op"])
+                ] + [
+                  $data_secrets[]
+                  | iam_change("bootstrap_data"; $secret_base + .; $data_member; ["create"])
+                ]
+              ) end
             )
           + [
               $mutations[$stage][] as $address
@@ -296,6 +402,87 @@ for stage in network server api worker build; do
   "${script_dir}/assert-network-hardening-stage-plan.sh" \
     "${plan}" "${fake_terraform}" "${stage}" >/dev/null
 done
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.server")
+    | .change.after.service_account[0].email) = "e2b-infra-instances@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/server.plan" >"${test_dir}/server-wrong-identity.plan"
+expect_fail "server stage cannot attach the worker/build identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-wrong-identity.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.server")
+    | .change.after.tags) = []
+' "${test_dir}/server.plan" >"${test_dir}/server-missing-discovery-tag.plan"
+expect_fail "server stage requires the server-only discovery tag" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-missing-discovery-tag.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.loki")
+    | .change.after.service_account[0].email) = "e2b-infra-instances@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/build.plan" >"${test_dir}/data-wrong-identity.plan"
+expect_fail "data stage cannot attach the worker/build identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/data-wrong-identity.plan" "${fake_terraform}" build
+
+# An interrupted create-before-destroy setup object replacement leaves a
+# deposed ABANDON entry. The next exact stage may forget only that old state
+# beside one current no-op; the old content-addressed cloud object is retained.
+jq '
+  .resource_changes += [{
+    address:"module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]",
+    deposed:"8df55091",
+    mode:"managed",
+    type:"google_storage_bucket_object",
+    change:{
+      actions:["delete"],
+      before:{
+        bucket:"monad-code-instance-setup",
+        deletion_policy:"ABANDON",
+        name:"run-nomad-11111.sh",
+        source:"/repo/nomad-cluster/scripts/run-nomad.sh"
+      },
+      after:null
+    }
+  }]
+' "${test_dir}/api.plan" >"${test_dir}/api-deposed-abandon-cleanup.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-abandon-cleanup.plan" "${fake_terraform}" api >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.deposed == "8df55091")
+    | .change.before.deletion_policy) = "DELETE"
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-delete-policy.plan"
+expect_fail "deposed setup cleanup must retain the cloud object with ABANDON" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-delete-policy.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(
+        .address == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]"
+        and .deposed == null
+      )
+    | .change.actions) = ["update"]
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-current-drift.plan"
+expect_fail "deposed setup cleanup requires one unchanged current object" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-current-drift.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(.deposed == "8df55091")
+    | .change.before.bucket) = "wrong-bucket"
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-wrong-bucket.plan"
+expect_fail "deposed setup cleanup is bound to the current object bucket" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-wrong-bucket.plan" "${fake_terraform}" api
 
 jq '
   .resource_changes |= map(
@@ -523,6 +710,91 @@ jq '
 expect_fail "server stage rejects unknown lifecycle repair policy" \
   "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/unknown-server-health-repair.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.role) = "roles/owner"
+' "${test_dir}/server.plan" >"${test_dir}/unsafe-bootstrap-iam.plan"
+expect_fail "server stage rejects over-broad bootstrap secret IAM" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/unsafe-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.project) = "other-project"
+' "${test_dir}/server.plan" >"${test_dir}/wrong-project-bootstrap-iam.plan"
+expect_fail "server stage binds bootstrap IAM to the selected project" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/wrong-project-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.member) = "serviceAccount:wrong@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/server.plan" >"${test_dir}/wrong-member-bootstrap-iam.plan"
+expect_fail "server stage binds bootstrap IAM to the exact attached identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/wrong-member-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  .resource_changes |= map(
+    select(.address != "module.cluster.google_secret_manager_secret_iam_member.bootstrap_server[\"projects/monad-code/secrets/e2b-nomad-secret-id\"]")
+  )
+' "${test_dir}/server.plan" >"${test_dir}/missing-bootstrap-iam.plan"
+expect_fail "server stage requires the exact three-resource server IAM set" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  .resource_changes += [{
+    address:"module.cluster.google_secret_manager_secret_iam_member.bootstrap_api[\"projects/monad-code/secrets/e2b-nomad-secret-id\"]",
+    mode:"managed",
+    type:"google_secret_manager_secret_iam_member",
+    change:{
+      actions:["create"],
+      before:null,
+      after:{
+        project:"monad-code",
+        secret_id:"projects/monad-code/secrets/e2b-nomad-secret-id",
+        role:"roles/secretmanager.secretAccessor",
+        member:"serviceAccount:e2b-api-controller@monad-code.iam.gserviceaccount.com"
+      }
+    }
+  }]
+' "${test_dir}/api.plan" >"${test_dir}/api-nomad-bootstrap-iam.plan"
+expect_fail "API stage cannot grant the Nomad management secret" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-nomad-bootstrap-iam.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.actions) = ["update"]
+' "${test_dir}/worker.plan" >"${test_dir}/worker-bootstrap-iam.plan"
+expect_fail "worker stage cannot mutate bootstrap secret IAM" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/worker-bootstrap-iam.plan" "${fake_terraform}" worker
+
+jq '
+  .resource_changes |= map(
+    if .type == "google_secret_manager_secret_iam_member" then
+      .change.actions = ["no-op"] | .change.before = .change.after
+    else . end
+  )
+' "${test_dir}/server.plan" >"${test_dir}/server-bootstrap-iam-noop.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-bootstrap-iam-noop.plan" "${fake_terraform}" server >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.actions) = ["delete"]
+' "${test_dir}/server.plan" >"${test_dir}/deleting-bootstrap-iam.plan"
+expect_fail "server recovery rejects destructive bootstrap IAM shapes" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/deleting-bootstrap-iam.plan" "${fake_terraform}" server
 
 # After a successful stage, only a recovery-token retry may keep the current
 # marker as a no-op while replacing the completion sentinel.
