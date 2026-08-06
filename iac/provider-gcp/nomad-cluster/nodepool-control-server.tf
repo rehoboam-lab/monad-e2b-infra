@@ -1,15 +1,16 @@
 locals {
   server_pool_name = "${var.prefix}${var.server_cluster_name}"
   server_startup_script = templatefile("${path.module}/scripts/start-server.sh", {
-    NUM_SERVERS                  = var.server_cluster_size
-    CLUSTER_TAG_NAME             = var.cluster_tag_name
-    SCRIPTS_BUCKET               = var.cluster_setup_bucket_name
-    NOMAD_TOKEN                  = var.nomad_acl_token_secret
-    CONSUL_TOKEN                 = var.consul_acl_token_secret
-    RUN_CONSUL_FILE_HASH         = local.file_hash["scripts/run-consul.sh"]
-    RUN_NOMAD_FILE_HASH          = local.file_hash["scripts/run-nomad.sh"]
-    NOMAD_VOTER_HEALTH_SCRIPT    = file("${path.module}/scripts/nomad-voter-health.py")
-    CONSUL_GOSSIP_ENCRYPTION_KEY = google_secret_manager_secret_version.consul_gossip_encryption_key.secret_data
+    NUM_SERVERS                = var.server_cluster_size
+    CLUSTER_TAG_NAME           = var.cluster_tag_name
+    SCRIPTS_BUCKET             = var.cluster_setup_bucket_name
+    NOMAD_TOKEN_SECRET_NAME    = var.nomad_acl_token_secret_name
+    CONSUL_TOKEN_SECRET_NAME   = var.consul_acl_token_secret_name
+    FETCH_GCP_SECRET_FILE_HASH = local.file_hash["scripts/fetch-gcp-secret.sh"]
+    RUN_CONSUL_FILE_HASH       = local.file_hash["scripts/run-consul.sh"]
+    RUN_NOMAD_FILE_HASH        = local.file_hash["scripts/run-nomad.sh"]
+    NOMAD_VOTER_HEALTH_SCRIPT  = file("${path.module}/scripts/nomad-voter-health.py")
+    CONSUL_GOSSIP_SECRET_NAME  = local.consul_gossip_secret_name
   })
 }
 
@@ -128,7 +129,7 @@ resource "google_compute_instance_template" "server" {
   instance_description = null
   machine_type         = var.server_machine_type
 
-  tags                    = [var.cluster_tag_name]
+  tags                    = [var.cluster_tag_name, local.nomad_server_tag_name]
   metadata_startup_script = local.server_startup_script
   metadata = merge({
     enable-osconfig         = "TRUE",
@@ -165,7 +166,7 @@ resource "google_compute_instance_template" "server" {
   }
 
   service_account {
-    email = var.google_service_account_email
+    email = var.nomad_server_service_account_email
     scopes = [
       "userinfo-email",
       "compute-ro",
@@ -185,6 +186,8 @@ resource "google_compute_instance_template" "server" {
 
   depends_on = [
     terraform_data.os_login_operator_access_guard,
+    google_secret_manager_secret_iam_member.bootstrap_server,
+    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
   ]

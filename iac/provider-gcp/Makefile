@@ -202,6 +202,15 @@ override WORKLOAD_PREREQUISITE_TARGETS := \
 	-target='module.init.google_artifact_registry_repository_iam_member.api_controller_core_reader' \
 	-target='module.init.google_storage_bucket_iam_member.api_controller' \
 	-target='module.init.google_project_iam_member.api_controller' \
+	-target='module.init.google_service_account.nomad_server_service_account' \
+	-target='module.init.google_service_account.data_node_service_account' \
+	-target='module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member' \
+	-target='module.init.google_artifact_registry_repository_iam_member.data_node_core_reader' \
+	-target='module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam' \
+	-target='module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam' \
+	-target='module.init.google_storage_bucket_iam_member.loki_storage_iam' \
+	-target='module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam' \
+	-target='module.init.google_project_iam_member.non_api_runtime' \
 	-target='google_artifact_registry_repository_iam_member.custom_environments_repository_member' \
 	-target='google_artifact_registry_repository_iam_member.custom_environments_repository_api_controller_member'
 WORKLOAD_CLUSTER_WAIT_SECONDS ?= 1800
@@ -294,7 +303,8 @@ workload-cluster-plan-check:
 		fi; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$(WORKLOAD_CLUSTER_PLAN)" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"
 
 workload-plan-assertions-test:
 	@ ./scripts/test-network-hardening-rollout.sh
@@ -358,6 +368,9 @@ keyless-runtime-check:
 	@ ./scripts/test-keyless-runtime-guard.sh
 	@ ./scripts/test-api-controller-identity.sh
 	@ ./scripts/test-configure-docker-gcp.sh
+	@ ./scripts/test-acl-secret-manager-bootstrap.sh
+	@ ./scripts/test-bootstrap-reboot-fail-closed.sh
+	@ ./scripts/test-role-identity-boundaries.sh
 	@ ./scripts/test-control-plane-secret-logging.sh
 	@ ./scripts/test-nomad-restart-safety.sh
 	@ ./scripts/test-server-voter-health.sh
@@ -509,7 +522,8 @@ workload-cluster-plan:
 			"$${after_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$${temp_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"; \
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${topology_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \
@@ -667,7 +681,8 @@ workload-cluster-apply:
 			"$${before_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$${apply_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"; \
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${topology_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \

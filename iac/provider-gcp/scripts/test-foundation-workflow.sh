@@ -513,6 +513,7 @@ cp \
 cp \
   "${provider_root}/nomad-cluster/scripts/configure-docker-gcp.sh" \
   "${provider_root}/nomad-cluster/scripts/nomad-voter-health.py" \
+  "${provider_root}/nomad-cluster/scripts/fetch-gcp-secret.sh" \
   "${provider_root}/nomad-cluster/scripts/run-consul.sh" \
   "${provider_root}/nomad-cluster/scripts/run-nomad.sh" \
   "${provider_root}/nomad-cluster/scripts/start-clickhouse.sh" \

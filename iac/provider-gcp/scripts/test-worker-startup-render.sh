@@ -53,7 +53,7 @@ render_startup() {
   cat >"${config_path}" <<EOF
 locals {
   startup = templatefile("${template_path}", {
-    CLUSTER_TAG_NAME = "test-cluster"
+    NOMAD_SERVER_TAG_NAME = "test-nomad-server"
     SCRIPTS_BUCKET = "scripts"
     FC_KERNELS_BUCKET_NAME = "kernels"
     FC_VERSIONS_BUCKET_NAME = "versions"
@@ -61,13 +61,10 @@ locals {
     FC_BUSYBOX_BUCKET_NAME = "busybox"
     DOCKER_CONTEXTS_BUCKET_NAME = "docker"
     GCP_REGION = "us-east4"
-    NOMAD_TOKEN = "nomad-token"
-    CONSUL_TOKEN = "consul-token"
+    NOMAD_TOKEN_SECRET_NAME = "projects/test/secrets/nomad"
+    FETCH_GCP_SECRET_FILE_HASH = "secret-hash"
     CONFIGURE_DOCKER_FILE_HASH = "docker-hash"
-    RUN_CONSUL_FILE_HASH = "consul-hash"
     RUN_NOMAD_FILE_HASH = "nomad-hash"
-    CONSUL_GOSSIP_ENCRYPTION_KEY = "gossip-key"
-    CONSUL_DNS_REQUEST_TOKEN = "dns-token"
     NFS_IP_ADDRESS = ""
     NFS_MOUNT_PATH = "/mnt/nfs"
     NFS_MOUNT_SUBDIR = "cache"
@@ -98,6 +95,21 @@ render_startup 48 "true" "${nondev_render}"
 
 bash -n "${dev_render}"
 bash -n "${nondev_render}"
+
+if grep -F 'projects/test/secrets/nomad' "${dev_render}" >/dev/null; then
+  printf 'Dev worker startup must not receive or fetch the Nomad management secret.\n' >&2
+  exit 1
+fi
+grep -F 'projects/test/secrets/nomad' "${nondev_render}" >/dev/null
+grep -F 'fetch-gcp-secret-secret-hash.sh' "${dev_render}" >/dev/null
+grep -F -- '--nomad-server-tag-name "test-nomad-server"' "${dev_render}" >/dev/null
+grep -F -- "--filter='status=RUNNING AND tags.items=test-nomad-server'" "${dev_render}" >/dev/null
+grep -F 'host nomad.service.consul' "${dev_render}" >/dev/null
+if grep -F -e 'projects/test/secrets/consul' -e 'projects/test/secrets/gossip' \
+  -e 'projects/test/secrets/dns' -e '--consul-token-file' "${dev_render}" "${nondev_render}" >/dev/null; then
+  printf 'Worker startup unexpectedly retained a Consul secret dependency.\n' >&2
+  exit 1
+fi
 
 if grep -Eq '^[[:space:]]*set[[:space:]]+-x([[:space:]]|$)' \
   "${template_path}" "${dev_render}" "${nondev_render}"; then
@@ -133,6 +145,15 @@ grep -F '[Fetching orchestrator version from Nomad servers' \
   "${nondev_render}" >/dev/null
 grep -F -- '--orchestrator-job-version "$ORCHESTRATOR_VERSION"' \
   "${nondev_render}" >/dev/null
+
+first_nomad_start_line="$(grep -n '/opt/nomad/bin/run-nomad.sh --client' "${nondev_render}" | head -1 | cut -d: -f1)"
+version_fetch_line="$(grep -n 'v1/var/nomad/jobs' "${nondev_render}" | head -1 | cut -d: -f1)"
+[[ -n "${first_nomad_start_line}" && -n "${version_fetch_line}" ]]
+if ((first_nomad_start_line <= version_fetch_line)); then
+  printf 'Non-dev worker registered an unpinned Nomad client before fetching the required version.\n' >&2
+  exit 1
+fi
+test "$(grep -c '/opt/nomad/bin/run-nomad.sh --client' "${nondev_render}")" -eq 1
 
 if grep -F 'fallocate -l 100G' "${dev_render}" >/dev/null; then
   printf 'Worker startup still contains the legacy hard-coded 100 GB swap allocation.\n' >&2

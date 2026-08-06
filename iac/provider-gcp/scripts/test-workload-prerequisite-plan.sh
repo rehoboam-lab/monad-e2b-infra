@@ -8,6 +8,7 @@ makefile="${script_dir}/../Makefile"
 cloud_sql_fixture="${script_dir}/testdata/cloud-sql-workload-resources.json"
 cloud_sql_project_state="${script_dir}/testdata/cloud-sql-project-state.json"
 api_controller_identity_fixture="${script_dir}/testdata/api-controller-identity-workload-resources.json"
+role_identity_fixture="${script_dir}/testdata/role-identity-workload-resources.json"
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "${test_dir}"' EXIT
 
@@ -27,6 +28,21 @@ for candidate_target in \
   grep -F -- "-target='${candidate_target}'" <<<"${prerequisite_targets}" >/dev/null || {
     printf 'Missing invited-beta Cloud SQL prerequisite target: %s\n' \
       "${candidate_target}" >&2
+    exit 1
+  }
+done
+for role_target in \
+  module.init.google_service_account.nomad_server_service_account \
+  module.init.google_service_account.data_node_service_account \
+  module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member \
+  module.init.google_artifact_registry_repository_iam_member.data_node_core_reader \
+  module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam \
+  module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam \
+  module.init.google_storage_bucket_iam_member.loki_storage_iam \
+  module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam \
+  module.init.google_project_iam_member.non_api_runtime; do
+  grep -F -- "-target='${role_target}'" <<<"${prerequisite_targets}" >/dev/null || {
+    printf 'Missing role-identity prerequisite target: %s\n' "${role_target}" >&2
     exit 1
   }
 done
@@ -51,7 +67,8 @@ chmod 0700 "${fake_terraform}"
 jq -n \
   --slurpfile cloud_sql "${cloud_sql_fixture}" \
   --slurpfile cloud_sql_project "${cloud_sql_project_state}" \
-  --slurpfile api_controller_identity "${api_controller_identity_fixture}" '
+  --slurpfile api_controller_identity "${api_controller_identity_fixture}" \
+  --slurpfile role_identity "${role_identity_fixture}" '
   {
     format_version: "1.2",
     terraform_version: "1.7.5",
@@ -71,6 +88,7 @@ jq -n \
           )
       )
       + $api_controller_identity[0]
+      + $role_identity[0]
       + [
         {
           address: "google_artifact_registry_repository.custom_environments_repository",
@@ -271,7 +289,7 @@ jq -n \
             expressions: {
               location: {references: ["var.gcp_region"]},
               member: {
-                references: ["module.init.service_account_email", "module.init"]
+                references: ["module.init.worker_build_service_account_email", "module.init"]
               },
               project: {references: ["var.gcp_project_id"]},
               repository: {
@@ -411,6 +429,60 @@ expect_failure() {
 }
 
 run_assertion "${test_dir}/reviewed.json" >/dev/null
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "module.init.google_service_account.nomad_server_service_account")
+    | .change.after.account_id
+  ) = "e2b-overprivileged-server"
+' "${test_dir}/reviewed.json" >"${test_dir}/wrong-server-identity.json"
+expect_failure \
+  wrong-server-identity \
+  "role-specific attached identities or their exact least-privilege grants drifted" \
+  "${test_dir}/wrong-server-identity.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "module.init.google_project_iam_member.non_api_runtime[\"data:roles/compute.networkViewer\"]")
+    | .change.after.member
+  ) = "serviceAccount:e2b-infra-instances@operator-canary.iam.gserviceaccount.com"
+' "${test_dir}/reviewed.json" >"${test_dir}/cross-role-project-grant.json"
+expect_failure \
+  cross-role-project-grant \
+  "role-specific attached identities or their exact least-privilege grants drifted" \
+  "${test_dir}/cross-role-project-grant.json"
+
+jq '
+  (
+    .resource_changes[]
+    | select(.address == "module.init.google_storage_bucket_iam_member.loki_storage_iam")
+    | .change.after.member
+  ) = "serviceAccount:e2b-infra-instances@operator-canary.iam.gserviceaccount.com"
+' "${test_dir}/reviewed.json" >"${test_dir}/loki-stays-on-worker.json"
+expect_failure \
+  loki-stays-on-worker \
+  "role-specific attached identities or their exact least-privilege grants drifted" \
+  "${test_dir}/loki-stays-on-worker.json"
+
+jq '
+  .resource_changes |= map(
+    if (
+      .address == "module.init.google_service_account.nomad_server_service_account"
+      or .address == "module.init.google_service_account.data_node_service_account"
+    ) then
+      .change.after.email = null
+      | .change.after_unknown.email = true
+    elif (
+      .address | test("data_node|data-node|nomad_server|nomad-server|non_api_runtime")
+    ) and .type != "google_service_account" then
+      .change.after.member = null
+      | .change.after_unknown.member = true
+    else . end
+  )
+' "${test_dir}/reviewed.json" >"${test_dir}/deferred-role-identities.json"
+run_assertion "${test_dir}/deferred-role-identities.json" >/dev/null
 
 jq '
   (

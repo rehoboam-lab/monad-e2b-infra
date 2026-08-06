@@ -162,7 +162,7 @@ locals {
     PROVIDER                      = "gcp"
     ARTIFACTS_REGISTRY_PROVIDER   = "GCP_ARTIFACTS"
     STORAGE_PROVIDER              = "GCPBucket"
-    GCP_SERVICE_ACCOUNT_EMAIL     = module.init.service_account_email
+    GCP_SERVICE_ACCOUNT_EMAIL     = module.init.worker_build_service_account_email
     GCS_GRPC_CONNECTION_POOL_SIZE = var.gcs_grpc_connection_pool_size != 0 ? tostring(var.gcs_grpc_connection_pool_size) : ""
     PERSISTENT_VOLUME_MOUNTS      = join(",", [for key, value in local.persistent_volume_types : format("%s:%s", key, value["local_mount_path"])])
     LAUNCH_DARKLY_API_KEY         = trimspace(data.google_secret_manager_secret_version.launch_darkly_api_key.secret_data)
@@ -182,7 +182,7 @@ locals {
 
   template_manager_env_vars = merge({
     CONSUL_TOKEN                    = module.init.consul_acl_token_secret
-    GCP_SERVICE_ACCOUNT_EMAIL       = module.init.service_account_email
+    GCP_SERVICE_ACCOUNT_EMAIL       = module.init.worker_build_service_account_email
     GCP_PROJECT_ID                  = var.gcp_project_id
     GCP_REGION                      = var.gcp_region
     GCP_DOCKER_REPOSITORY_NAME      = google_artifact_registry_repository.custom_environments_repository.name
@@ -326,17 +326,15 @@ module "cluster" {
   client_proxy_port        = var.client_proxy_port
   client_proxy_health_port = var.client_proxy_health_port
 
-  ingress_port                 = var.ingress_port
-  api_port                     = var.api_port
-  docker_reverse_proxy_port    = var.docker_reverse_proxy_port
-  nomad_port                   = var.nomad_port
-  google_service_account_email = module.init.service_account_email
-  api_controller_service_account_email = (
-    var.environment == "dev"
-    ? module.init.api_controller_service_account_email
-    : module.init.service_account_email
-  )
-  domain_name = var.domain_name
+  ingress_port                         = var.ingress_port
+  api_port                             = var.api_port
+  docker_reverse_proxy_port            = var.docker_reverse_proxy_port
+  nomad_port                           = var.nomad_port
+  nomad_server_service_account_email   = module.init.nomad_server_service_account_email
+  worker_build_service_account_email   = module.init.worker_build_service_account_email
+  data_node_service_account_email      = module.init.data_node_service_account_email
+  api_controller_service_account_email = module.init.api_controller_service_account_email
+  domain_name                          = var.domain_name
 
   additional_domains                      = local.additional_domains
   additional_api_paths_handled_by_ingress = local.normalized_api_paths_handled_by_ingress
@@ -351,8 +349,8 @@ module "cluster" {
   clickhouse_job_constraint_prefix = var.clickhouse_job_constraint_prefix
   clickhouse_health_port           = var.clickhouse_health_port
 
-  consul_acl_token_secret = module.init.consul_acl_token_secret
-  nomad_acl_token_secret  = module.init.nomad_acl_token_secret
+  consul_acl_token_secret_name = module.init.consul_acl_token_secret_name
+  nomad_acl_token_secret_name  = module.init.nomad_acl_token_secret_name
 
   filestore_cache_enabled     = var.filestore_cache_enabled
   filestore_cache_tier        = var.filestore_cache_tier
@@ -584,7 +582,7 @@ module "remote_repository" {
   gcp_project_id = var.gcp_project_id
   gcp_region     = var.gcp_region
 
-  google_service_account_email = module.init.service_account_email
+  google_service_account_email = module.init.worker_build_service_account_email
 
   dockerhub_username_secret_name = module.init.dockerhub_username_secret_name
   dockerhub_password_secret_name = module.init.dockerhub_password_secret_name

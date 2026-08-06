@@ -108,19 +108,16 @@ variable "nomad_port" {
   type = number
 }
 
-variable "consul_acl_token_secret" {
-  type      = string
-  sensitive = true
+variable "consul_acl_token_secret_name" {
+  type = string
 }
 
-variable "consul_gossip_encryption_key_secret_data" {
-  type      = string
-  sensitive = true
+variable "consul_gossip_encryption_key_secret_name" {
+  type = string
 }
 
-variable "consul_dns_request_token_secret_data" {
-  type      = string
-  sensitive = true
+variable "consul_dns_request_token_secret_name" {
+  type = string
 }
 
 variable "node_pool" {

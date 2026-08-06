@@ -6,12 +6,42 @@
 
 set -euo pipefail
 
-# This rendered script receives Consul ACL material. Never enable xtrace: its
-# output is copied to the serial console, syslog, and user-data.log.
+# This rendered script receives only Secret Manager resource names. Never
+# enable xtrace: bootstrap still handles fetched secrets in process memory.
 
 # Send the log output from this script to user-data.log, syslog, and the console
 # Inspired by https://alestic.com/2010/12/ec2-user-data-output/
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+# Worker/build hosts deliberately have no Consul ACL, gossip, or DNS-secret
+# access. Keep any legacy Consul unit runtime-masked and remove Nomad from
+# Supervisor before doing boot work. A failed ADC fetch therefore leaves the
+# Nomad health endpoint down and the MIG unhealthy.
+bootstrap_complete=false
+acl_dir=""
+quiesce_orchestrators() {
+  set +e
+  supervisorctl stop nomad >/dev/null 2>&1
+  rm -f -- /etc/supervisor/conf.d/run-nomad.conf
+  supervisorctl reread >/dev/null 2>&1
+  supervisorctl update >/dev/null 2>&1
+  systemctl stop consul.service >/dev/null 2>&1
+  systemctl disable consul.service >/dev/null 2>&1
+  systemctl mask --runtime consul.service >/dev/null 2>&1
+  set -e
+}
+bootstrap_cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ "$bootstrap_complete" != "true" ]]; then
+    quiesce_orchestrators
+  fi
+  [[ -z "$acl_dir" ]] || rm -rf -- "$acl_dir"
+  exit "$status"
+}
+trap bootstrap_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+quiesce_orchestrators
 
 %{ if LOCAL_SSD == "true" }
   # Add cache disk for orchestrator and swapfile
@@ -218,30 +248,67 @@ mkdir -p $busybox_dir
 gcsfuse -o=allow_other,ro --file-mode 755 --config-file $fuse_config --implicit-dirs "${FC_BUSYBOX_BUCKET_NAME}" $busybox_dir
 
 # These variables are passed in via Terraform template interpolation
-gsutil cp "gs://${SCRIPTS_BUCKET}/run-consul-${RUN_CONSUL_FILE_HASH}.sh" /opt/consul/bin/run-consul.sh
 gsutil cp "gs://${SCRIPTS_BUCKET}/run-nomad-${RUN_NOMAD_FILE_HASH}.sh" /opt/nomad/bin/run-nomad.sh
+gsutil cp "gs://${SCRIPTS_BUCKET}/fetch-gcp-secret-${FETCH_GCP_SECRET_FILE_HASH}.sh" /opt/fetch-gcp-secret.sh
 gsutil cp "gs://${SCRIPTS_BUCKET}/configure-docker-gcp-${CONFIGURE_DOCKER_FILE_HASH}.sh" /opt/configure-docker-gcp.sh
 
-chmod +x /opt/consul/bin/run-consul.sh /opt/nomad/bin/run-nomad.sh /opt/configure-docker-gcp.sh
+chmod +x /opt/nomad/bin/run-nomad.sh /opt/fetch-gcp-secret.sh /opt/configure-docker-gcp.sh
+
+umask 077
+acl_dir="$(mktemp -d /run/e2b-bootstrap-acl.XXXXXX)"
+
+%{ if SET_ORCHESTRATOR_VERSION_METADATA == "true" }
+/opt/fetch-gcp-secret.sh "${NOMAD_TOKEN_SECRET_NAME}" "$acl_dir/nomad" uuid
+nomad_curl_config="$acl_dir/nomad-api.curl"
+printf 'header = "X-Nomad-Token: %s"\n' "$(<"$acl_dir/nomad")" >"$nomad_curl_config"
+%{ endif }
 
 /opt/configure-docker-gcp.sh "${GCP_REGION}-docker.pkg.dev"
 
-mkdir -p /etc/systemd/resolved.conf.d/
-touch /etc/systemd/resolved.conf.d/consul.conf
-cat <<EOF >/etc/systemd/resolved.conf.d/consul.conf
-[Resolve]
-DNS=127.0.0.1:8600
-DNSSEC=false
-EOF
-sync  # Ensure file is written to disk
-
-# Remove GCE's DNS config to prevent it from competing with Consul DNS (GCP-specific fix)
-# We don't need routing domains since Consul handles ALL DNS:
-#   - .consul queries: served directly by Consul
-#   - other queries: forwarded to GCE DNS via Consul's recursor config
-if [ -f /etc/systemd/resolved.conf.d/gce-resolved.conf ]; then
-  mv /etc/systemd/resolved.conf.d/gce-resolved.conf /etc/systemd/resolved.conf.d/gce-resolved.conf.disabled
+# Restore provider DNS if this boot disk previously ran the legacy local
+# Consul client. Worker/build hosts no longer participate in gossip, but their
+# host jobs still resolve the platform service catalog through the control
+# servers' authenticated Consul DNS listeners.
+rm -f -- /etc/systemd/resolved.conf.d/consul.conf /etc/systemd/resolved.conf.d/docker.conf
+if [[ -f /etc/systemd/resolved.conf.d/gce-resolved.conf.disabled ]]; then
+  mv /etc/systemd/resolved.conf.d/gce-resolved.conf.disabled /etc/systemd/resolved.conf.d/gce-resolved.conf
 fi
+
+PROJECT_ID=$(curl -fsS -H 'Metadata-Flavor: Google' \
+  http://metadata.google.internal/computeMetadata/v1/project/project-id)
+NOMAD_SERVER_IPS=$(gcloud compute instances list \
+  --project "$PROJECT_ID" \
+  --filter='status=RUNNING AND tags.items=${NOMAD_SERVER_TAG_NAME}' \
+  --format='value(networkInterfaces[0].networkIP)' \
+  | awk 'NF')
+if [[ -z "$NOMAD_SERVER_IPS" ]]; then
+  echo '- ERROR: no running Consul DNS server discovered through the server-only GCE tag' >&2
+  exit 1
+fi
+CONSUL_DNS_LINES=$(awk 'NF { print "DNS=" $1 ":8600" }' <<<"$NOMAD_SERVER_IPS")
+cat > /etc/systemd/resolved.conf.d/consul.conf <<EOF
+[Resolve]
+$CONSUL_DNS_LINES
+DNSSEC=false
+Domains=~consul
+EOF
+cat > /etc/systemd/resolved.conf.d/docker.conf <<EOF
+[Resolve]
+DNSStubListener=yes
+DNSStubListenerExtra=172.17.0.1
+EOF
+systemctl restart systemd-resolved
+
+for i in {1..60}; do
+  if host nomad.service.consul >/dev/null 2>&1; then
+    break
+  fi
+  if [[ "$i" -eq 60 ]]; then
+    echo '- ERROR: remote Consul DNS did not become ready' >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 # Set up huge pages
 # We are not enabling Transparent Huge Pages for now, as they are not swappable and may result in slowdowns + we are not using swap right now.
@@ -315,63 +382,10 @@ overcommitment_hugepages=$(remove_decimal $overcommitment_hugepages)
 echo "- Allocating $overcommitment_hugepages huge pages ($overcommitment_hugepages_percentage%) for overcommitment"
 echo $overcommitment_hugepages >/proc/sys/vm/nr_overcommit_hugepages
 
-# Get GCE DNS server dynamically from metadata for Consul recursors
-# This ensures we can resolve internet domains through Consul
-GCE_DNS=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/dns-servers || echo "169.254.169.254")
-
-# Start Consul first (in background) with GCE DNS as recursor
-# This allows Consul to handle both .consul queries AND forward internet queries
-# These variables are passed in via Terraform template interpolation
-/opt/consul/bin/run-consul.sh --client \
-    --consul-token "${CONSUL_TOKEN}" \
-    --cluster-tag-name "${CLUSTER_TAG_NAME}" \
-    --enable-gossip-encryption \
-    --gossip-encryption-key "${CONSUL_GOSSIP_ENCRYPTION_KEY}" \
-    --dns-request-token "${CONSUL_DNS_REQUEST_TOKEN}" \
-    --recursor "$${GCE_DNS}" &
-
-# Give Consul a moment to start its DNS server on port 8600
-echo "- Waiting for Consul DNS to start on port 8600..."
-for i in {1..60}; do
-  if nc -z 127.0.0.1 8600 2>/dev/null; then
-    echo "- Consul DNS is ready (attempt $i/60)"
-    break
-  fi
-  if [ $i -eq 60 ]; then
-    echo "- ERROR: Consul DNS not responding after 60 seconds, exiting..."
-    exit 1
-  fi
-  sleep 1
-done
-
-# Now restart systemd-resolved to apply Consul DNS configuration
-# This must happen AFTER Consul starts, otherwise systemd-resolved marks 127.0.0.1:8600 as unreachable
-# Consul DNS (127.0.0.1:8600) is the ONLY DNS server configured in systemd-resolved
-# Consul handles ALL queries: .consul directly, everything else via recursor to GCE DNS
-echo "[Configuring systemd-resolved for Consul DNS]"
-echo "- Restarting systemd-resolved to apply Consul DNS config"
-systemctl restart systemd-resolved
-echo "- Waiting for systemd-resolved to settle"
-
-# Give Consul a moment to start its DNS server on port 8600
-echo "- Waiting for Systemd-resolved to start..."
-for i in {1..60}; do
-  if host google.com 2>/dev/null; then
-    echo "- DNS resolving is ready (attempt $i/60)"
-    break
-  fi
-  if [ $i -eq 60 ]; then
-    echo "- ERROR: Systemd-resolved not responding after 60 seconds, exiting..."
-    exit 1
-  fi
-  sleep 1
-done
-echo "- Flushing DNS caches"
-resolvectl flush-caches
-
 %{ if SET_ORCHESTRATOR_VERSION_METADATA == "true" }
-# Fetch orchestrator version from Nomad variable via HTTP API (before starting Nomad client)
-# This is required - the node cannot start without knowing the orchestrator version
+# Fetch the required scheduling pin directly from a GCE-discovered server
+# before registering this client. There is no unpinned Nomad-client window in
+# which a dev-shaped jobspec or a stale constraint could place allocations.
 FETCH_TIMEOUT_SECONDS=600
 FETCH_INTERVAL_SECONDS=5
 FETCH_MAX_ATTEMPTS=$((FETCH_TIMEOUT_SECONDS / FETCH_INTERVAL_SECONDS + 1))
@@ -380,21 +394,20 @@ echo "[Fetching orchestrator version from Nomad servers (timeout: $${FETCH_TIMEO
 ORCHESTRATOR_VERSION=""
 for i in $(seq 1 $FETCH_MAX_ATTEMPTS); do
   ELAPSED=$(((i - 1) * FETCH_INTERVAL_SECONDS))
-  NOMAD_SERVER=$(dig +short nomad.service.consul | head -1)
-  if [ -z "$NOMAD_SERVER" ]; then
-    echo "- Waiting for Consul DNS (nomad.service.consul)... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
+  API_RESPONSE=""
+  for NOMAD_SERVER in $NOMAD_SERVER_IPS; do
+    API_RESPONSE=$(curl --config "$nomad_curl_config" -s --connect-timeout 5 --max-time 10 \
+      "http://$NOMAD_SERVER:4646/v1/var/nomad/jobs" 2>/dev/null || true)
+    [[ -z "$API_RESPONSE" ]] || break
+  done
+  if echo "$API_RESPONSE" | jq -e '.Items.latest_orchestrator_job_id' >/dev/null 2>&1; then
+    ORCHESTRATOR_VERSION=$(echo "$API_RESPONSE" | jq -r '.Items.latest_orchestrator_job_id')
+    echo "- Fetched orchestrator version: $ORCHESTRATOR_VERSION"
+    break
+  elif [ -n "$API_RESPONSE" ]; then
+    echo "- Invalid response from local Nomad API, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
   else
-    API_RESPONSE=$(curl -s --connect-timeout 5 --max-time 10 -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
-      "http://$NOMAD_SERVER:4646/v1/var/nomad/jobs" 2>/dev/null)
-    if echo "$API_RESPONSE" | jq -e '.Items.latest_orchestrator_job_id' >/dev/null 2>&1; then
-      ORCHESTRATOR_VERSION=$(echo "$API_RESPONSE" | jq -r '.Items.latest_orchestrator_job_id')
-      echo "- Fetched orchestrator version: $ORCHESTRATOR_VERSION"
-      break
-    elif [ -n "$API_RESPONSE" ]; then
-      echo "- Invalid response from Nomad API, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
-    else
-      echo "- No response from Nomad API at $${NOMAD_SERVER}, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
-    fi
+    echo "- No discovered Nomad server responded, retrying... ($${ELAPSED}s / $${FETCH_TIMEOUT_SECONDS}s)"
   fi
   if [ $i -eq $FETCH_MAX_ATTEMPTS ]; then
     echo "- ERROR: Could not fetch orchestrator version from Nomad servers after $${FETCH_TIMEOUT_SECONDS}s"
@@ -404,10 +417,12 @@ for i in $(seq 1 $FETCH_MAX_ATTEMPTS); do
   sleep $FETCH_INTERVAL_SECONDS
 done
 
-/opt/nomad/bin/run-nomad.sh --client --consul-token "${CONSUL_TOKEN}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}" --orchestrator-job-version "$ORCHESTRATOR_VERSION" &
+/opt/nomad/bin/run-nomad.sh --client --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}" --orchestrator-job-version "$ORCHESTRATOR_VERSION"
 %{ else }
-/opt/nomad/bin/run-nomad.sh --client --consul-token "${CONSUL_TOKEN}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}" &
+/opt/nomad/bin/run-nomad.sh --client --nomad-server-tag-name "${NOMAD_SERVER_TAG_NAME}" --node-pool "${NODE_POOL}" --node-labels "${NODE_LABELS}"
 %{ endif }
+
+bootstrap_complete=true
 
 # Add alias for ssh-ing to sbx
 echo '_sbx_ssh() {

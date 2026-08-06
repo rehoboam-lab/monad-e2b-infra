@@ -2,6 +2,7 @@
 # This script is used to configure and run Consul on a Google Compute Instance.
 
 set -e
+umask 077
 
 # Import the appropriate bash commons libraries
 readonly BASH_COMMONS_DIR="/opt/gruntwork/bash-commons"
@@ -9,6 +10,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 readonly CONSUL_CONFIG_FILE="default.json"
 readonly SYSTEMD_CONFIG_PATH="/etc/systemd/system/consul.service"
+readonly BOOTSTRAP_RUNTIME_ROOT="/run"
 
 readonly COMPUTE_INSTANCE_METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
 readonly GOOGLE_CLOUD_METADATA_REQUEST_HEADER="Metadata-Flavor: Google"
@@ -42,7 +44,7 @@ function print_usage {
   echo
   echo -e "  --server\t\tIf set, run in server mode. Optional. Exactly one of --server or --client must be set."
   echo -e "  --client\t\tIf set, run in client mode. Optional. Exactly one of --server or --client must be set."
-  echo -e "  --consul-token\t\tThe Consul ACL token to use."
+  echo -e "  --consul-token-file\tPath to the mode-0600 file containing the Consul ACL token."
   echo -e "  --cluster-tag-name\tAutomatically form a cluster with Instances that have the same value for this Compute Instance tag name. Optional."
   echo -e "  --datacenter\t\tThe name of the datacenter Consul is running in. Optional. If not specified, will default to GCP region name."
   echo -e "  --config-dir\t\tThe path to the Consul config folder. Optional. Default is the absolute path of '../config', relative to this script."
@@ -52,8 +54,8 @@ function print_usage {
   echo -e "  --bin-dir\t\tThe path to the folder with Consul binary. Optional. Default is the absolute path of the parent folder of this script."
   echo -e "  --user\t\tThe user to run Consul as. Optional. Default is to use the owner of --config-dir."
   echo -e "  --enable-gossip-encryption\t\tEnable encryption of gossip traffic between nodes. Optional. Must also specify --gossip-encryption-key."
-  echo -e "  --gossip-encryption-key\t\tThe key to use for encrypting gossip traffic. Optional. Must be specified with --enable-gossip-encryption."
-  echo -e "  --dns-request-token\t\tThe token to use for DNS requests."
+  echo -e "  --gossip-encryption-key-file\tPath to the mode-0600 gossip encryption key file."
+  echo -e "  --dns-request-token-file\tPath to the mode-0600 Consul DNS token file."
   echo -e "  --enable-rpc-encryption\t\tEnable encryption of RPC traffic between nodes. Optional. Must also specify --ca-file-path, --cert-file-path and --key-file-path."
   echo -e "  --ca-path\t\tPath to the directory of CA files used to verify outgoing connections. Optional. Must be specified with --enable-rpc-encryption."
   echo -e "  --cert-file-path\tPath to the certificate file used to verify incoming connections. Optional. Must be specified with --enable-rpc-encryption and --key-file-path."
@@ -85,6 +87,54 @@ function get_instance_metadata_value {
 
   log_info "Looking up Metadata value at $COMPUTE_INSTANCE_METADATA_URL/$path"
   curl --silent --show-error --location --header "$GOOGLE_CLOUD_METADATA_REQUEST_HEADER" "$COMPUTE_INSTANCE_METADATA_URL/$path"
+}
+
+function read_secret_file {
+  local -r arg_name="$1"
+  local -r path="$2"
+  local mode
+
+  if [[ ! -f "$path" || -L "$path" ]]; then
+    log_error "The value for '$arg_name' must name a regular, non-symlink file"
+    exit 1
+  fi
+  if mode="$(stat -c '%a' "$path" 2>/dev/null)"; then
+    :
+  else
+    mode="$(stat -f '%Lp' "$path")"
+  fi
+  if ((8#$mode & 077)); then
+    log_error "The file for '$arg_name' must not be accessible by group or other users"
+    exit 1
+  fi
+
+  REPLY="$(<"$path")"
+  assert_not_empty "$arg_name" "$REPLY"
+}
+
+function consul_api_put_file {
+  (
+    local -r consul_token="$1"
+    local -r path="$2"
+    local -r payload_file="$3"
+    local request_dir
+    local curl_config
+
+    umask 077
+    request_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-api.XXXXXX")"
+    curl_config="$request_dir/request.curl"
+    trap 'rm -rf -- "$request_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cat >"$curl_config" <<EOF
+fail
+silent
+show-error
+header = "X-Consul-Token: $consul_token"
+header = "Content-Type: application/json"
+EOF
+    curl --config "$curl_config" --request PUT --data-binary "@$payload_file" \
+      "http://127.0.0.1:8500$path" >/dev/null
+  )
 }
 
 # Get the value of the given Custom Metadata Key
@@ -290,6 +340,7 @@ EOF
 
   log_info "Installing Consul config file in $config_path"
   echo "$default_config_json" | jq '.' >"$config_path"
+  chmod 0600 "$config_path"
   chown "$user:$user" "$config_path"
 }
 
@@ -357,14 +408,19 @@ EOF
 }
 
 function start_consul {
-  log_info "Reloading systemd config and starting Consul"
+  log_info "Reloading systemd config and explicitly starting Consul"
 
+  # Bootstrap keeps Consul runtime-masked until all required credentials have
+  # been fetched and validated. Never enable this unit: a reboot must execute
+  # metadata startup and revalidate credentials before Consul can run.
+  sudo systemctl unmask --runtime consul.service
   sudo systemctl daemon-reload
-  sudo systemctl enable consul.service
+  sudo systemctl disable consul.service
   sudo systemctl restart consul.service
 }
 
 function bootstrap {
+  (
   log_info "Waiting for Consul to start"
   instance_ip_address=$(get_instance_ip_address)
   log_info "Instance IP Address: $instance_ip_address"
@@ -375,10 +431,28 @@ function bootstrap {
 
     if [[ "$consul_leader_addr" == "\"$instance_ip_address:8300\"" ]]; then
       local consul_token="$1"
+      local bootstrap_dir
+      local token_file
+      local bootstrap_output
+      local bootstrap_status
       log_info "Bootstrapping Consul"
-      echo "${consul_token}" >/tmp/consul.token
-      consul acl bootstrap /tmp/consul.token
-      rm /tmp/consul.token
+      bootstrap_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-bootstrap.XXXXXX")"
+      trap 'rm -rf -- "$bootstrap_dir"' EXIT
+      trap 'exit 1' HUP INT TERM
+      token_file="$bootstrap_dir/token"
+      : >"$token_file"
+      chmod 0600 "$token_file"
+      printf '%s\n' "$consul_token" >"$token_file"
+      set +e
+      bootstrap_output="$(consul acl bootstrap "$token_file" 2>&1)"
+      bootstrap_status=$?
+      set -e
+      if [[ "$bootstrap_status" -ne 0 ]]; then
+        log_error "Consul ACL bootstrap failed"
+        return "$bootstrap_status"
+      fi
+      unset bootstrap_output
+      log_info "Consul ACL bootstrap completed"
 
       break
     fi
@@ -392,26 +466,44 @@ function bootstrap {
     log_info "Waiting for Consul to start"
     sleep 1
   done
+  )
 }
 
 function setup_dns_resolving {
-  local consul_token="$1"
-  local dns_request_token="$2"
+  (
+    local consul_token="$1"
+    local dns_request_token="$2"
+    local work_dir
+    local dns_policy
+    local register_policy
+    local consul_token_file
+    local dns_token_file
+    local token_payload
+    local agent_payload
 
-  until consul info -token="${consul_token}" > /dev/null 2>&1;
+    umask 077
+    work_dir="$(mktemp -d "$BOOTSTRAP_RUNTIME_ROOT/e2b-consul-dns-bootstrap.XXXXXX")"
+    trap 'rm -rf -- "$work_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    dns_policy="$work_dir/dns-request-policy.hcl"
+    register_policy="$work_dir/register-service-policy.hcl"
+    consul_token_file="$work_dir/consul-token"
+    dns_token_file="$work_dir/dns-token"
+    printf '%s' "$consul_token" >"$consul_token_file"
+    printf '%s' "$dns_request_token" >"$dns_token_file"
+
+  until CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul info > /dev/null 2>&1;
   do
     log_info "Waiting for Consul to start"
     sleep 1
   done
 
-  if (($(consul acl policy read -name="dns-request-policy" -token="${consul_token}" -format=json | jq '.ID' | wc -l) > 0)); then
+  if CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy read -name="dns-request-policy" >/dev/null 2>&1; then
     log_info "DNS Request Policy already exists"
-    return
   else
     # Based on https://developer.hashicorp.com/consul/tutorials/security/access-control-setup-production#token-for-dns
     # Token is created on the leader node, so there's no problem with duplication
-    touch dns-request-policy.hcl
-    cat <<EOF >dns-request-policy.hcl
+    cat <<EOF >"$dns_policy"
 node_prefix "" {
   policy = "read"
 }
@@ -420,22 +512,24 @@ service_prefix "" {
 }
 EOF
 
-    touch register-service-policy.hcl
-    cat <<EOF >register-service-policy.hcl
+    cat <<EOF >"$register_policy"
 service_prefix "" {
   policy = "write"
 }
 EOF
-      consul acl policy create -name "dns-request-policy" -rules @dns-request-policy.hcl -token="${consul_token}"
-      consul acl policy create -name "register-service-policy" -rules @register-service-policy.hcl -token="${consul_token}"
-      consul acl token create -secret "${dns_request_token}" -description "Client Token" -policy-name "dns-request-policy" -policy-name "register-service-policy" -token="${consul_token}"
-      rm dns-request-policy.hcl
-      rm register-service-policy.hcl
+      CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy create -name "dns-request-policy" -rules "@$dns_policy"
+      CONSUL_HTTP_TOKEN_FILE="$consul_token_file" consul acl policy create -name "register-service-policy" -rules "@$register_policy"
+      token_payload="$work_dir/token.json"
+      jq -n --rawfile token "$dns_token_file" '{SecretID:$token,Description:"Client Token",Policies:[{Name:"dns-request-policy"},{Name:"register-service-policy"}]}' >"$token_payload"
+      consul_api_put_file "$consul_token" '/v1/acl/token' "$token_payload"
   fi
 
 
-  consul acl set-agent-token -token="${consul_token}" default "${dns_request_token}"
+  agent_payload="$work_dir/agent.json"
+  jq -n --rawfile token "$dns_token_file" '{Token:$token}' >"$agent_payload"
+  consul_api_put_file "$consul_token" '/v1/agent/token/default' "$agent_payload"
   log_info "Client token set"
+  )
 }
 
 # Based on: http://unix.stackexchange.com/a/7732/215969
@@ -497,9 +591,9 @@ function run {
     --client)
       client="true"
       ;;
-    --consul-token)
-      assert_not_empty "$key" "$2"
-      consul_token="$2"
+    --consul-token-file)
+      read_secret_file "$key" "$2"
+      consul_token="$REPLY"
       shift
       ;;
     --config-dir)
@@ -579,14 +673,14 @@ function run {
     --enable-gossip-encryption)
       enable_gossip_encryption="true"
       ;;
-    --gossip-encryption-key)
-      assert_not_empty "$key" "$2"
-      gossip_encryption_key="$2"
+    --gossip-encryption-key-file)
+      read_secret_file "$key" "$2"
+      gossip_encryption_key="$REPLY"
       shift
       ;;
-    --dns-request-token)
-      assert_not_empty "$key" "$2"
-      dns_request_token="$2"
+    --dns-request-token-file)
+      read_secret_file "$key" "$2"
+      dns_request_token="$REPLY"
       shift
       ;;
     --enable-rpc-encryption)
@@ -716,4 +810,6 @@ function run {
   fi
 }
 
-run "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  run "$@"
+fi

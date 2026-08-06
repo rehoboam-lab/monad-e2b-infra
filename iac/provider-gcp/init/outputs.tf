@@ -1,5 +1,21 @@
 output "service_account_email" {
-  value = google_service_account.infra_instances_service_account.email
+  description = "Deprecated alias for the worker/build attached identity."
+  value       = google_service_account.infra_instances_service_account.email
+}
+
+output "worker_build_service_account_email" {
+  description = "Attached identity for Nomad worker and template-build hosts."
+  value       = google_service_account.infra_instances_service_account.email
+}
+
+output "nomad_server_service_account_email" {
+  description = "Attached identity for Nomad and Consul control servers."
+  value       = google_service_account.nomad_server_service_account.email
+}
+
+output "data_node_service_account_email" {
+  description = "Attached identity for Loki and ClickHouse data nodes."
+  value       = google_service_account.data_node_service_account.email
 }
 
 output "api_controller_service_account_email" {
@@ -17,9 +33,19 @@ output "consul_acl_token_secret" {
   sensitive = true
 }
 
+output "consul_acl_token_secret_name" {
+  description = "Secret Manager resource name read by GCE bootstrap through its attached identity."
+  value       = google_secret_manager_secret.consul_acl_token.name
+}
+
 output "nomad_acl_token_secret" {
   value     = google_secret_manager_secret_version.nomad_acl_token_active.secret_data
   sensitive = true
+}
+
+output "nomad_acl_token_secret_name" {
+  description = "Secret Manager resource name read by GCE bootstrap through its attached identity."
+  value       = google_secret_manager_secret.nomad_acl_token.name
 }
 
 output "api_admin_token_secret_name" {
