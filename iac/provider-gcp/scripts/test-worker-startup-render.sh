@@ -52,6 +52,9 @@ render_startup() {
 locals {
   startup = templatefile("${template_path}", {
     NOMAD_SERVER_TAG_NAME = "test-nomad-server"
+    CONSUL_SERVER_MIG_NAME = "test-server-rig"
+    CONSUL_SERVER_ROLE_LABEL = "test-nomad-server"
+    CONSUL_SERVER_SERVICE_ACCOUNT = "server@test.iam.gserviceaccount.com"
     SCRIPTS_BUCKET = "scripts"
     FC_KERNELS_BUCKET_NAME = "kernels"
     FC_VERSIONS_BUCKET_NAME = "versions"
@@ -93,7 +96,8 @@ if grep -F -e 'projects/test/secrets/nomad' -e 'fetch-gcp-secret' "${dev_render}
   printf 'Worker startup must not receive or fetch a management secret.\n' >&2
   exit 1
 fi
-grep -F 'refresh-consul-resolvers-resolver-hash.sh' "${dev_render}" >/dev/null
+grep -F 'install_setup_script refresh-consul-resolvers "resolver-hash" /opt/e2b/bin/refresh-consul-resolvers.sh' \
+  "${dev_render}" >/dev/null
 grep -F -- '--nomad-server-tag-name "test-nomad-server"' "${dev_render}" >/dev/null
 grep -F 'refresh-consul-resolvers.timer' "${dev_render}" >/dev/null
 grep -F 'host consul.service.consul' "${dev_render}" >/dev/null

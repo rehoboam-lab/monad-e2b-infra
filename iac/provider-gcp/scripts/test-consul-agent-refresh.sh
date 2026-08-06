@@ -4,8 +4,15 @@ set -euo pipefail
 
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly consul_script="$script_dir/../nomad-cluster/scripts/run-consul.sh"
+readonly gce_identity_script="$script_dir/../nomad-cluster/scripts/consul-gce-agent-identity.sh"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/e2b-consul-agent-refresh.XXXXXX")"
-trap 'rm -rf -- "$test_root"' EXIT
+cleanup() {
+  local status=$?
+  trap - EXIT
+  rm -rf -- "$test_root"
+  exit "$status"
+}
+trap cleanup EXIT
 
 mkdir -p "$test_root/bash-commons" "$test_root/runtime" "$test_root/lock" "$test_root/systemd" "$test_root/config" "$test_root/data" "$test_root/bin"
 cat >"$test_root/bash-commons/assert.sh" <<'EOF'
@@ -36,6 +43,7 @@ sed \
   -e "s#readonly GCE_AGENT_REFRESH_SERVICE=.*#readonly GCE_AGENT_REFRESH_SERVICE=\"$test_root/systemd/e2b-consul-agent-refresh.service\"#" \
   -e "s#readonly GCE_AGENT_REFRESH_TIMER=.*#readonly GCE_AGENT_REFRESH_TIMER=\"$test_root/systemd/e2b-consul-agent-refresh.timer\"#" \
   "$consul_script" >"$test_root/run-consul.sh"
+cp "$gce_identity_script" "$test_root/consul-gce-agent-identity.sh"
 
 # shellcheck source=/dev/null
 source "$test_root/run-consul.sh"
@@ -79,6 +87,24 @@ readonly NEW_ACCESSOR='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 initialize_gce_agent_runtime_config root
 write_generation "$OLD_TOKEN" "$OLD_ACCESSOR" 3600
 gce_agent_runtime_has_headroom 900
+
+# Initial activation must bridge the deliberate boot-marker ordering: the
+# complete current-boot tuple exists before systemd can acknowledge the reload,
+# while the stale timer remains unable to create that marker by itself.
+initial_activation_calls="$test_root/initial-activation.calls"
+: >"$initial_activation_calls"
+systemctl() {
+  printf '%s\n' "$*" >>"$initial_activation_calls"
+  case "$*" in
+    'is-active --quiet consul.service') return 0 ;;
+    'reload consul.service') return 0 ;;
+    *) return 0 ;;
+  esac
+}
+rm -f -- "$GCE_AGENT_BOOT_READY"
+activate_current_gce_agent_generation
+gce_agent_boot_is_ready
+grep -Fqx 'reload consul.service' "$initial_activation_calls"
 mark_gce_agent_boot_ready '1234567890123456789'
 gce_agent_boot_is_ready
 jq -e --arg accessor "$OLD_ACCESSOR" '.schema == 2 and .accessor_id == $accessor' "$GCE_AGENT_RUNTIME_LEASE" >/dev/null
@@ -88,6 +114,10 @@ file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 [[ "$(file_mode "$GCE_AGENT_RUNTIME_LEASE")" == 600 ]]
 [[ "$(file_mode "$GCE_AGENT_RUNTIME_CONFIG")" == 640 ]]
 [[ "$(file_mode "$GCE_AGENT_RECOVERY_TOKEN")" == 640 ]]
+if persist_gce_agent_pending_revoke "$GCE_AGENT_RUNTIME_TOKEN" '10.0.0.10'; then
+  echo 'remote Consul endpoint was accepted for a GCE identity token' >&2
+  exit 1
+fi
 
 # The safety boundary is strictly greater than the maximum 12-minute timer
 # interval plus margin: 901 seconds passes and 900 seconds fails.
@@ -122,8 +152,7 @@ revoke_gce_agent_login_token() {
   printf '\n' >>"$revoke_calls"
 }
 
-refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com
+refresh_gce_agent_identity us-east4 root
 [[ "$(tr -d '\r\n' <"$GCE_AGENT_RUNTIME_TOKEN")" == "$NEW_TOKEN" ]]
 grep -Fqx 'reload consul.service' "$calls"
 grep -Fqx "$OLD_TOKEN" "$revoke_calls"
@@ -149,8 +178,7 @@ systemctl() {
     *) return 0 ;;
   esac
 }
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com; then
+if refresh_gce_agent_identity us-east4 root; then
   echo 'failed SIGHUP refresh unexpectedly succeeded' >&2
   exit 1
 fi
@@ -183,8 +211,7 @@ systemctl() {
 write_generation "$OLD_TOKEN" "$OLD_ACCESSOR" 3600
 rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL"
 : >"$calls"
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com; then
+if refresh_gce_agent_identity us-east4 root; then
   echo 'refresh mutated an active agent without a rollback journal' >&2
   exit 1
 fi
@@ -219,8 +246,7 @@ write_generation "$OLD_TOKEN" "$OLD_ACCESSOR" 3600
 rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL"
 : >"$calls"
 : >"$revoke_calls"
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com; then
+if refresh_gce_agent_identity us-east4 root; then
   echo 'double reload failure was reported as converged' >&2
   exit 1
 fi
@@ -273,8 +299,7 @@ revoke_gce_agent_login_token() {
   tr -d '\r\n' <"$1" >>"$revoke_calls"
   printf '\n' >>"$revoke_calls"
 }
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com; then
+if refresh_gce_agent_identity us-east4 root; then
   echo 'old-token logout failure was reported as converged' >&2
   exit 1
 fi
@@ -286,8 +311,7 @@ acquire_gce_agent_identity() {
 }
 : >"$acquire_calls"
 : >"$revoke_calls"
-refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com
+refresh_gce_agent_identity us-east4 root
 [[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
 [[ ! -s "$acquire_calls" ]]
 grep -Fqx "$OLD_TOKEN" "$revoke_calls"
@@ -306,8 +330,7 @@ acquire_gce_agent_identity() {
 }
 : >"$acquire_calls"
 : >"$revoke_calls"
-refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com
+refresh_gce_agent_identity us-east4 root
 [[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
 [[ ! -s "$acquire_calls" ]]
 grep -Fqx "$OLD_TOKEN" "$revoke_calls"
@@ -320,7 +343,7 @@ rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL" "$GCE_AGENT_PENDING_REVOKE_DIR"
 mkdir -p "$GCE_AGENT_PENDING_REVOKE_DIR"
 chmod 0700 "$GCE_AGENT_PENDING_REVOKE_DIR"
 write_generation "$NEW_TOKEN" "$NEW_ACCESSOR" 3600
-persist_gce_agent_pending_revoke "$GCE_AGENT_RUNTIME_TOKEN" '10.0.0.10'
+persist_gce_agent_pending_revoke "$GCE_AGENT_RUNTIME_TOKEN" '127.0.0.1'
 pending_first_login="$REPLY"
 [[ -f "$pending_first_login" ]]
 consul_active=false
@@ -338,8 +361,7 @@ acquire_gce_agent_identity() {
 }
 : >"$calls"
 : >"$acquire_calls"
-refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com
+refresh_gce_agent_identity us-east4 root
 [[ "$consul_active" == true ]]
 [[ ! -e "$pending_first_login" ]]
 [[ ! -s "$acquire_calls" ]]
@@ -348,7 +370,7 @@ grep -Fqx 'start consul.service' "$calls"
 # A failed activation cannot turn the durable pending record into an
 # acknowledgement. It fail-closes, retains the retry barrier, and still must
 # not issue a second login.
-persist_gce_agent_pending_revoke "$GCE_AGENT_RUNTIME_TOKEN" '10.0.0.10'
+persist_gce_agent_pending_revoke "$GCE_AGENT_RUNTIME_TOKEN" '127.0.0.1'
 failed_activation_pending="$REPLY"
 consul_active=false
 systemctl() {
@@ -362,8 +384,7 @@ systemctl() {
 : >"$calls"
 : >"$acquire_calls"
 : >"$fail_close_calls"
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com; then
+if refresh_gce_agent_identity us-east4 root; then
   echo 'failed first-generation activation was reported as converged' >&2
   exit 1
 fi
@@ -385,8 +406,7 @@ fi
 # No boot marker means a stale timer cannot acquire, rewrite, or start Consul.
 rm -f -- "$GCE_AGENT_BOOT_READY"
 : >"$calls"
-if refresh_gce_agent_identity tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com >/dev/null 2>&1; then
+if refresh_gce_agent_identity us-east4 root >/dev/null 2>&1; then
   echo 'refresh without boot generation unexpectedly succeeded' >&2
   exit 1
 fi
@@ -396,8 +416,7 @@ fi
 # timer is started only for this boot (never persistently enabled).
 systemctl() { printf '%s\n' "$*" >>"$calls"; }
 : >"$calls"
-install_gce_agent_refresh_timer tag us-east4 root server-rig nomad-server \
-  e2b-nomad-server@monad-code.iam.gserviceaccount.com
+install_gce_agent_refresh_timer us-east4 root
 grep -Eq '^ExecReload=.*/run-consul\.sh --reload-gce-agent$' < <(
   generate_systemd_config "$test_root/systemd/generated-consul.service" \
     "$test_root/config" "$test_root/data" '' '' "$test_root/bin" root \
@@ -430,14 +449,10 @@ dispatch_calls="$test_root/dispatch.calls"
 : >"$dispatch_calls"
 acquire_gce_agent_bootstrap_lock() { printf 'lock:%s\n' "$1" >>"$dispatch_calls"; }
 refresh_gce_agent_identity() { printf 'refresh:%s\n' "$*" >>"$dispatch_calls"; }
-run --refresh-gce-agent --datacenter us-east4 --user root \
-  --gce-agent-server-tag-name e2b-orch-server \
-  --gce-agent-server-mig-name e2b-orch-server-rig \
-  --gce-agent-server-role-label nomad-server \
-  --gce-agent-server-service-account e2b-nomad-server@monad-code.iam.gserviceaccount.com
+run --refresh-gce-agent --datacenter us-east4 --user root
 cat >"$test_root/expected-dispatch" <<'EOF'
 lock:nonblock
-refresh:e2b-orch-server us-east4 root e2b-orch-server-rig nomad-server e2b-nomad-server@monad-code.iam.gserviceaccount.com
+refresh:us-east4 root
 EOF
 cmp "$test_root/expected-dispatch" "$dispatch_calls"
 

@@ -4,8 +4,15 @@ set -euo pipefail
 
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly consul_script="$script_dir/../nomad-cluster/scripts/run-consul.sh"
+readonly gce_identity_script="$script_dir/../nomad-cluster/scripts/consul-gce-agent-identity.sh"
 readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/e2b-consul-agent-acquire.XXXXXX")"
-trap 'rm -rf -- "$test_root"' EXIT
+cleanup() {
+  local status=$?
+  trap - EXIT
+  rm -rf -- "$test_root"
+  exit "$status"
+}
+trap cleanup EXIT
 
 mkdir -p "$test_root/bash-commons" "$test_root/runtime"
 cat >"$test_root/bash-commons/assert.sh" <<'EOF'
@@ -30,6 +37,7 @@ sed \
   -e "s#readonly GCE_AGENT_ROTATION_JOURNAL=.*#readonly GCE_AGENT_ROTATION_JOURNAL=\"$test_root/runtime/rotation-transaction\"#" \
   -e "s#readonly GCE_AGENT_PENDING_REVOKE_DIR=.*#readonly GCE_AGENT_PENDING_REVOKE_DIR=\"$test_root/runtime/pending-revocations\"#" \
   "$consul_script" >"$test_root/run-consul.sh"
+cp "$gce_identity_script" "$test_root/consul-gce-agent-identity.sh"
 
 # shellcheck source=/dev/null
 source "$test_root/run-consul.sh"

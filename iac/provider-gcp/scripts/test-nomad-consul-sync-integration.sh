@@ -18,6 +18,8 @@ readonly consul_client_instance_id='1234567890123456789'
 readonly gce_identity_audience='https://consul.monad-code.internal/e2b/gce-agent'
 readonly gce_identity_issuer='https://accounts.google.com'
 readonly gce_identity_service_account='e2b-api-controller@monad-code.iam.gserviceaccount.com'
+readonly host_uid="$(id -u)"
+readonly host_gid="$(id -g)"
 
 cleanup() {
   status=$?
@@ -52,7 +54,10 @@ base64url() {
 }
 
 docker network create "$network_name" >/dev/null
-mkdir -p "$test_root/consul" "$test_root/consul-client" "$test_root/nomad-server" "$test_root/nomad-client"
+mkdir -p \
+  "$test_root/consul" "$test_root/consul-data" \
+  "$test_root/consul-client" "$test_root/consul-client-data" \
+  "$test_root/nomad-server" "$test_root/nomad-client"
 
 cat >"$test_root/consul/config.json" <<EOF
 {
@@ -71,14 +76,17 @@ cat >"$test_root/consul/config.json" <<EOF
   }
 }
 EOF
-chmod 0644 "$test_root/consul/config.json"
+chmod 0600 "$test_root/consul/config.json"
 
 docker run -d \
   --name "$consul_name" \
+  --user "$host_uid:$host_gid" \
+  -e CONSUL_DISABLE_PERM_MGMT=1 \
   --network "$network_name" \
   -p 127.0.0.1::8500 \
   -p 127.0.0.1::8600/udp \
   -v "$test_root/consul:/test-config:ro" \
+  -v "$test_root/consul-data:/consul/data" \
   hashicorp/consul:1.17.3 \
   agent -config-file=/test-config/config.json -data-dir=/consul/data >/dev/null
 
@@ -237,14 +245,17 @@ cat >"$test_root/consul-client/config.json" <<EOF
   }
 }
 EOF
-chmod 0644 "$test_root/consul-client/config.json"
+chmod 0600 "$test_root/consul-client/config.json"
 docker run -d \
   --name "$consul_client_name" \
+  --user "$host_uid:$host_gid" \
+  -e CONSUL_DISABLE_PERM_MGMT=1 \
   --hostname "$consul_client_name" \
   --network "$network_name" \
   -p 127.0.0.1::8500 \
   -p 127.0.0.1::8600/udp \
   -v "$test_root/consul-client:/test-config:ro" \
+  -v "$test_root/consul-client-data:/consul/data" \
   hashicorp/consul:1.17.3 \
   agent -config-file=/test-config/config.json -data-dir=/consul/data >/dev/null
 readonly consul_client_http_port="$(docker port "$consul_client_name" 8500/tcp | awk -F: 'NR == 1 {print $NF}')"
@@ -327,7 +338,7 @@ consul {
   server_auto_join = false
 }
 EOF
-chmod 0644 "$test_root/nomad-server/server.hcl" "$test_root/nomad-client/client.hcl"
+chmod 0600 "$test_root/nomad-server/server.hcl" "$test_root/nomad-client/client.hcl"
 
 docker run -d \
   --name "$nomad_server_name" \

@@ -5,6 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="${root_dir}/nomad-cluster/scripts/fetch-gcp-secret.sh"
 nomad_script="${root_dir}/nomad-cluster/scripts/run-nomad.sh"
 consul_script="${root_dir}/nomad-cluster/scripts/run-consul.sh"
+gce_identity_script="${root_dir}/nomad-cluster/scripts/consul-gce-agent-identity.sh"
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "$work_dir"' EXIT
 runtime_root="$work_dir/runtime"
@@ -64,7 +65,7 @@ for startup_script in \
   "${root_dir}/modules/nodepool-api/scripts/start-api.sh" \
   "${root_dir}/nomad-cluster/scripts/start-clickhouse.sh" \
   "${root_dir}/nomad-cluster/scripts/start-server.sh"; do
-  grep -F 'install_setup_script fetch-gcp-secret "$FETCH_GCP_SECRET_FILE_HASH" /opt/fetch-gcp-secret.sh' \
+  grep -F 'install_setup_script fetch-gcp-secret "${FETCH_GCP_SECRET_FILE_HASH}" /opt/fetch-gcp-secret.sh' \
     "$startup_script" >/dev/null
 done
 
@@ -229,6 +230,7 @@ sed \
   -e "s#readonly BASH_COMMONS_DIR=.*#readonly BASH_COMMONS_DIR=\"$work_dir/bash-commons\"#" \
   -e "s#readonly BOOTSTRAP_RUNTIME_ROOT=.*#readonly BOOTSTRAP_RUNTIME_ROOT=\"$runtime_root\"#" \
   "$consul_script" >"$work_dir/run-consul.sh"
+cp "$gce_identity_script" "$work_dir/consul-gce-agent-identity.sh"
 
 cat >"$work_dir/consul-bin/consul" <<'EOF'
 #!/usr/bin/env bash

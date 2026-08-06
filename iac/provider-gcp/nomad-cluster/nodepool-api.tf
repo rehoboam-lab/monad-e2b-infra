@@ -14,6 +14,7 @@ locals {
     FETCH_GCP_SECRET_FILE_HASH   = local.file_hash["scripts/fetch-gcp-secret.sh"]
     CONFIGURE_DOCKER_FILE_HASH   = local.file_hash["scripts/configure-docker-gcp.sh"]
     RUN_CONSUL_FILE_HASH         = local.file_hash["scripts/run-consul.sh"]
+    CONSUL_GCE_AGENT_FILE_HASH   = local.file_hash["scripts/consul-gce-agent-identity.sh"]
     RUN_NOMAD_FILE_HASH          = local.file_hash["scripts/run-nomad.sh"]
     CONSUL_GOSSIP_SECRET_NAME    = local.consul_gossip_secret_version_name
     CONSUL_DNS_TOKEN_SECRET_NAME = local.consul_catalog_read_secret_version_name
@@ -196,6 +197,7 @@ resource "google_compute_instance_template" "api" {
     google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/configure-docker-gcp.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
+    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/consul-gce-agent-identity.sh"],
   ]
 }
