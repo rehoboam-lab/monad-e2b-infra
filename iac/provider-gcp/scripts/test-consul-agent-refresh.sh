@@ -235,42 +235,44 @@ mv "$test_root/expired-lease" "$GCE_AGENT_RUNTIME_LEASE"
 rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL" "$GCE_AGENT_PENDING_REVOKE_DIR"
 recovery_calls="$test_root/recovery.calls"
 recovery_login_seen="$test_root/recovery-login.seen"
+consul_active_state="$test_root/consul-active"
+consul_masked_state="$test_root/consul-masked"
 : >"$recovery_calls"
-consul_active=true
-consul_masked=false
+: >"$consul_active_state"
+rm -f -- "$consul_masked_state"
 systemctl() {
   printf '%s\n' "$*" >>"$recovery_calls"
   case "$*" in
-    'mask --runtime consul.service') consul_masked=true ;;
-    'kill --kill-who=main --signal=KILL consul.service') consul_active=false ;;
-    'stop consul.service') consul_active=false ;;
-    'unmask --runtime consul.service') consul_masked=false ;;
+    'mask --runtime consul.service') : >"$consul_masked_state" ;;
+    'kill --kill-who=main --signal=KILL consul.service') rm -f -- "$consul_active_state" ;;
+    'stop consul.service') rm -f -- "$consul_active_state" ;;
+    'unmask --runtime consul.service') rm -f -- "$consul_masked_state" ;;
     'daemon-reload') return 0 ;;
     'start --no-block consul.service')
-      [[ "$consul_masked" == false ]]
+      [[ ! -e "$consul_masked_state" ]]
       gce_agent_recovery_runtime_config_is_valid
-      consul_active=true
+      : >"$consul_active_state"
       ;;
     'reload consul.service')
-      [[ "$consul_active" == true ]]
+      [[ -e "$consul_active_state" ]]
       gce_agent_runtime_has_headroom 900
       ;;
-    'is-active --quiet consul.service') [[ "$consul_active" == true ]] ;;
+    'is-active --quiet consul.service') [[ -e "$consul_active_state" ]] ;;
     *) return 0 ;;
   esac
 }
 fail_close_consul_agent
-[[ "$consul_active" == false && "$consul_masked" == true ]]
+[[ ! -e "$consul_active_state" && -e "$consul_masked_state" ]]
 [[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
 acquire_gce_agent_identity() {
-  [[ "$consul_active" == true && "$consul_masked" == false ]]
+  [[ -e "$consul_active_state" && ! -e "$consul_masked_state" ]]
   gce_agent_recovery_runtime_config_is_valid
   printf 'recovery-login\n' >"$recovery_login_seen"
   write_generation "$NEW_TOKEN" "$NEW_ACCESSOR" 3600
 }
 refresh_gce_agent_identity us-east4 root
 [[ -f "$recovery_login_seen" ]]
-[[ "$consul_active" == true && "$consul_masked" == false ]]
+[[ -e "$consul_active_state" && ! -e "$consul_masked_state" ]]
 [[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
 [[ "$(tr -d '\r\n' <"$GCE_AGENT_RUNTIME_TOKEN")" == "$NEW_TOKEN" ]]
 gce_agent_runtime_has_headroom 900
@@ -301,15 +303,15 @@ if refresh_gce_agent_identity us-east4 root; then
   echo 'failed recovery-only login was reported as converged' >&2
   exit 1
 fi
-[[ "$consul_active" == false && "$consul_masked" == true ]]
+[[ ! -e "$consul_active_state" && -e "$consul_masked_state" ]]
 [[ ! -e "$GCE_AGENT_RUNTIME_CONFIG" ]]
 acquire_gce_agent_identity() {
-  [[ "$consul_active" == true && "$consul_masked" == false ]]
+  [[ -e "$consul_active_state" && ! -e "$consul_masked_state" ]]
   gce_agent_recovery_runtime_config_is_valid
   write_generation "$NEW_TOKEN" "$NEW_ACCESSOR" 3600
 }
 refresh_gce_agent_identity us-east4 root
-[[ "$consul_active" == true && "$consul_masked" == false ]]
+[[ -e "$consul_active_state" && ! -e "$consul_masked_state" ]]
 gce_agent_runtime_has_headroom 900
 
 # If both candidate reload and rollback reload fail, the agent is fail-closed
