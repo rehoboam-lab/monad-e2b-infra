@@ -6,8 +6,14 @@ nomad_script="${root_dir}/nomad-cluster/scripts/run-nomad.sh"
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "${work_dir}"' EXIT
 
+runtime_root="${work_dir}/runtime-tmpfs"
+mkdir -p "$runtime_root"
+test_nomad_script="${work_dir}/run-nomad.sh"
+sed "s#readonly BOOTSTRAP_RUNTIME_ROOT=.*#readonly BOOTSTRAP_RUNTIME_ROOT=\"$runtime_root\"#" \
+  "$nomad_script" >"$test_nomad_script"
+
 # shellcheck source=/dev/null
-source "$nomad_script"
+source "$test_nomad_script"
 
 # Cleanup is deliberately exact: remove the two historical CLI documents and
 # leave every unrelated file alone.
@@ -99,7 +105,7 @@ case "${1:-}" in
         printf 'Node-pool document was written into the agent config directory: %s\n' "$document" >&2
         exit 1
         ;;
-      "$NOMAD_TEST_TMPDIR"/nomad-node-pools.*/*)
+      "$NOMAD_TEST_TMPDIR"/e2b-nomad-node-pools.*/*)
         ;;
       *)
         printf 'Node-pool document was not written to the bounded temporary directory: %s\n' "$document" >&2
@@ -143,8 +149,15 @@ case "${1:-}" in
     grep -Fxq \
       "command=$NOMAD_TEST_BIN_DIR/nomad agent -config $NOMAD_TEST_CONFIG_DIR -data-dir $NOMAD_TEST_DATA_DIR" \
       "$NOMAD_TEST_SUPERVISOR_CONFIG"
-    "$NOMAD_TEST_BIN_DIR/nomad" agent -config "$NOMAD_TEST_CONFIG_DIR" -data-dir "$NOMAD_TEST_DATA_DIR"
     printf 'supervisor:update\n' >>"$NOMAD_TEST_CALLS"
+    ;;
+  status)
+    exit 1
+    ;;
+  start)
+    test "${2:-}" = "nomad"
+    "$NOMAD_TEST_BIN_DIR/nomad" agent -config "$NOMAD_TEST_CONFIG_DIR" -data-dir "$NOMAD_TEST_DATA_DIR"
+    printf 'supervisor:start\n' >>"$NOMAD_TEST_CALLS"
     ;;
   restart)
     test "${2:-}" = "nomad"
@@ -171,11 +184,9 @@ export NOMAD_TEST_CALLS="$calls_file"
 export NOMAD_TEST_CONFIG_DIR="$runtime_config_dir"
 export NOMAD_TEST_DATA_DIR="$runtime_data_dir"
 export NOMAD_TEST_SUPERVISOR_CONFIG="$runtime_supervisor_config"
-export NOMAD_TEST_TMPDIR="${work_dir}/node-pool-tmp"
+export NOMAD_TEST_TMPDIR="$runtime_root"
 
-PATH="${work_dir}/stub-bin:${PATH}" \
-  TMPDIR="$NOMAD_TEST_TMPDIR" \
-  create_node_pools 'test-token'
+PATH="${work_dir}/stub-bin:${PATH}" create_node_pools 'test-token'
 
 expected_applies=$'apply:api_node_pool.hcl\napply:build_node_pool.hcl'
 actual_applies="$(grep '^apply:' "$calls_file")"
@@ -195,7 +206,6 @@ test "$runtime_config_files" = "default.hcl"
 
 : >"$calls_file"
 if PATH="${work_dir}/stub-bin:${PATH}" \
-  TMPDIR="$NOMAD_TEST_TMPDIR" \
   NOMAD_TEST_FAIL_POOL=build_node_pool.hcl \
   create_node_pools 'test-token'; then
   printf 'A failed node-pool apply unexpectedly succeeded.\n' >&2
@@ -220,8 +230,14 @@ PATH="${work_dir}/stub-bin:${PATH}" start_nomad
 PATH="${work_dir}/stub-bin:${PATH}" supervisorctl restart nomad
 
 test "$(grep -c '^agent$' "$calls_file")" -eq 2
+grep -Fqx 'autostart=false' "$runtime_supervisor_config"
+if grep -Fqx 'autostart=true' "$runtime_supervisor_config"; then
+  printf 'Nomad must not autostart from a persisted Supervisor configuration.\n' >&2
+  exit 1
+fi
 grep -Fqx 'supervisor:reread' "$calls_file"
 grep -Fqx 'supervisor:update' "$calls_file"
+grep -Fqx 'supervisor:start' "$calls_file"
 grep -Fqx 'supervisor:restart' "$calls_file"
 
 # Exercise run's orchestration order in an isolated copy of the normal
@@ -268,7 +284,9 @@ bash -c '
   node_pool=""
   node_labels=""
   orchestrator_job_version=""
-  run --server --num-servers 3 --consul-token test-consul --nomad-token-file /run/e2b-nomad-health/token
+  token_dir="$(mktemp -d)"
+  trap '\''rm -rf -- "$token_dir"'\'' EXIT
+  run --server --num-servers 3 --nomad-server-legacy-tag-name orch --nomad-server-tag-name test-nomad-server --nomad-token-file /run/e2b-nomad-health/token
 ' bash "${run_fixture}/bin/run-nomad.sh"
 
 printf 'Nomad restart safety regression test passed.\n'

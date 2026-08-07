@@ -38,20 +38,70 @@ resource "google_secret_manager_secret_version" "consul_acl_token_legacy" {
   deletion_policy = "DISABLE"
 
   lifecycle {
-    ignore_changes = [secret_data]
+    # The explicit post-build retirement workflow owns the live enablement
+    # transition. Ignoring that field prevents a targeted prerequisite or
+    # staged host plan from disabling a still-in-use legacy credential before
+    # every old allocation and GCE client has been replaced.
+    ignore_changes = [secret_data, enabled]
   }
 }
 
 resource "google_secret_manager_secret_version" "consul_acl_token_active" {
   secret      = google_secret_manager_secret.consul_acl_token.name
   secret_data = local.consul_acl_token
+  enabled     = false
 
   deletion_policy = "DISABLE"
 
-  # On an existing foundation, the prior version is first moved to the legacy
-  # address and disabled. On a fresh foundation, the disabled placeholder is
-  # created before the active version, so "latest" always resolves to active.
-  depends_on = [google_secret_manager_secret_version.consul_acl_token_legacy]
+  # Existing foundations retain this exact payload only for the explicit
+  # IAP-local handoff. New servers use the separately registered candidate.
+  # Keep the old version declaratively disabled so a later Terraform apply
+  # cannot undo quarantine performed by the recovery workflow.
+  lifecycle {
+    # See the legacy version above. Both historical pins remain quarantined by
+    # the handoff workflow after retirement without Terraform re-enabling them.
+    ignore_changes = [secret_data, enabled]
+  }
+}
+
+# A separately versioned global-management SecretID supports an explicit
+# register -> prove -> switch -> revoke handoff. The current active SecretID
+# remains enabled until every legacy allocation and host has migrated; merely
+# changing a job spec does not invalidate copies retained in Nomad history.
+resource "random_password" "consul_acl_token_candidate_seed" {
+  length  = 64
+  special = false
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
+}
+
+resource "google_secret_manager_secret" "consul_acl_token_candidate" {
+  secret_id = "${var.prefix}consul-management-candidate-token"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    time_sleep.secrets_api_wait_60_seconds,
+  ]
+}
+
+locals {
+  consul_acl_token_candidate = uuidv5("dns", random_password.consul_acl_token_candidate_seed.result)
+}
+
+resource "google_secret_manager_secret_version" "consul_acl_token_candidate" {
+  secret      = google_secret_manager_secret.consul_acl_token_candidate.name
+  secret_data = local.consul_acl_token_candidate
+
+  deletion_policy = "DISABLE"
+
+  depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
+    google_secret_manager_secret_version.consul_acl_token_active,
+  ]
 }
 
 resource "google_secret_manager_secret" "nomad_acl_token" {
@@ -93,7 +143,9 @@ resource "google_secret_manager_secret_version" "nomad_acl_token_active" {
 
   deletion_policy = "DISABLE"
 
-  depends_on = [google_secret_manager_secret_version.nomad_acl_token_legacy]
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
 }
 
 resource "random_password" "api_admin_secret" {

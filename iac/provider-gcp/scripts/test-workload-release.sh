@@ -825,9 +825,19 @@ jq \
           marker: "module.cluster.terraform_data.network_hardening_rollout_stage_network"
         },
         {
+          stage: "server-safety",
+          completion: "module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]",
+          marker: "module.cluster.terraform_data.network_hardening_rollout_stage_server_safety[0]"
+        },
+        {
           stage: "server",
-          completion: "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]",
-          marker: "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]"
+          completion: "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]",
+          marker: "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]"
+        },
+        {
+          stage: "server-health",
+          completion: "module.cluster.terraform_data.network_hardening_rollout_completion_server_health[0]",
+          marker: "module.cluster.terraform_data.network_hardening_rollout_stage_server_health[0]"
         },
         {
           stage: "api",
@@ -891,6 +901,16 @@ jq '
       end
     )
   | .resource_changes += [
+      {
+        address: "module.cluster.terraform_data.acl_bootstrap_environment_guard",
+        mode: "managed",
+        type: "terraform_data",
+        change: {
+          actions: ["create"],
+          before: null,
+          after: {input: "dev"}
+        }
+      },
       {
         address: "module.cluster.terraform_data.os_login_operator_access_guard",
         mode: "managed",
@@ -1016,6 +1036,24 @@ mode="$(cat "${WORKFLOW_MODE_FILE}")"
 case "${1:-}" in
   version)
     printf '%s\n' '{"terraform_version":"1.7.5"}'
+    ;;
+  output)
+    [[ "${2:-}" == "-raw" ]] || exit 2
+    case "${3:-}" in
+      nomad_acl_token_secret_version_name)
+        printf '%s\n' 'projects/monad-code/secrets/e2b-nomad-secret-id/versions/2'
+        ;;
+      consul_acl_token_secret_version_name)
+        printf '%s\n' 'projects/monad-code/secrets/e2b-consul-secret-id/versions/2'
+        ;;
+      consul_acl_token_legacy_secret_version_name)
+        printf '%s\n' 'projects/monad-code/secrets/e2b-consul-secret-id/versions/1'
+        ;;
+      consul_acl_token_candidate_secret_version_name)
+        printf '%s\n' 'projects/monad-code/secrets/e2b-consul-management-candidate-token/versions/1'
+        ;;
+      *) exit 2 ;;
+    esac
     ;;
   plan)
     output=""

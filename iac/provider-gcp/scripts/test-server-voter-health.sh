@@ -36,12 +36,15 @@ fi
 
 grep -Fq 'request_path = "/healthz"' "${server_tf}"
 grep -Fq 'port         = 50001' "${server_tf}"
-grep -Fq 'health_check      = google_compute_health_check.server_nomad_check.id' "${server_tf}"
+grep -Fq 'local.server_strict_health_enabled' "${server_tf}"
+grep -Fq 'google_compute_health_check.server_voter_check.id' "${server_tf}"
+grep -Fq 'google_compute_health_check.server_nomad_check_legacy[0].id' "${server_tf}"
 grep -Fq 'replacement_method = "SUBSTITUTE"' "${server_tf}"
-grep -Fq 'max_unavailable_fixed = 0' "${server_tf}"
+grep -Fq 'max_unavailable_fixed = local.server_safety_policy_enabled ? 0 : 1' "${server_tf}"
 grep -Fq 'default_action_on_failure = "REPAIR"' "${server_tf}"
 grep -Fq 'force_update_on_repair    = "NO"' "${server_tf}"
-grep -Fq 'on_failed_health_check    = "DO_NOTHING"' "${server_tf}"
+grep -Fq 'on_failed_health_check = (' "${server_tf}"
+grep -Fq '? "DO_NOTHING"' "${server_tf}"
 
 health_firewall_block="$(
   awk '

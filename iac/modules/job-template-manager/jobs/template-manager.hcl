@@ -1,4 +1,8 @@
 job "template-manager" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   type = "service"
   node_pool  = "${node_pool}"
   priority = 75

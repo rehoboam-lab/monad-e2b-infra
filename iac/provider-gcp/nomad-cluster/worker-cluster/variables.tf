@@ -127,6 +127,26 @@ variable "cluster_tag_name" {
   type        = string
 }
 
+variable "nomad_server_tag_name" {
+  description = "Server-only GCE network tag used by Nomad client retry_join discovery."
+  type        = string
+}
+
+variable "consul_server_mig_name" {
+  description = "Exact regional managed instance group containing Consul servers."
+  type        = string
+}
+
+variable "consul_server_role_label" {
+  description = "Exact monad_role label required on Consul server instances."
+  type        = string
+}
+
+variable "consul_server_service_account" {
+  description = "Exact attached service account required on Consul server instances."
+  type        = string
+}
+
 # SERVICE ACCOUNT & AUTHENTICATION
 
 variable "google_service_account_email" {
@@ -141,30 +161,6 @@ variable "google_service_account_email" {
 variable "nomad_port" {
   description = "Port number for Nomad server communication"
   type        = number
-}
-
-variable "nomad_acl_token_secret" {
-  description = "Nomad ACL token for client authentication"
-  type        = string
-  sensitive   = true
-}
-
-variable "consul_acl_token_secret" {
-  description = "Consul ACL token for client authentication"
-  type        = string
-  sensitive   = true
-}
-
-variable "consul_gossip_encryption_key_secret_data" {
-  description = "Consul gossip encryption key from secret manager"
-  type        = string
-  sensitive   = true
-}
-
-variable "consul_dns_request_token_secret_data" {
-  description = "Consul DNS request token from secret manager"
-  type        = string
-  sensitive   = true
 }
 
 variable "node_pool" {
@@ -257,11 +253,6 @@ variable "labels" {
 variable "file_hash" {
   description = "Map of setup script file paths to their content hashes for versioning"
   type        = map(string)
-}
-
-variable "set_orchestrator_version_metadata" {
-  description = "Whether to set orchestrator_version node metadata from Nomad variable on startup"
-  type        = bool
 }
 
 variable "node_labels" {

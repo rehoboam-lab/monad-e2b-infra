@@ -29,9 +29,8 @@ data "google_secret_manager_secret_version" "launch_darkly_api_key" {
 }
 
 provider "nomad" {
-  address      = "https://nomad.${var.domain_name}"
-  secret_id    = var.nomad_acl_token_secret
-  consul_token = var.consul_acl_token_secret
+  address   = "https://nomad.${var.domain_name}"
+  secret_id = var.nomad_acl_token_secret
 }
 
 // Turn on memory oversubscription
@@ -60,7 +59,7 @@ module "ingress" {
   update_stanza = var.api_machine_count > 1
 
   nomad_token  = var.nomad_acl_token_secret
-  consul_token = var.consul_acl_token_secret
+  consul_token = var.consul_catalog_read_token
 
   otel_collector_grpc_endpoint = "localhost:${var.otel_collector_grpc_port}"
 }
@@ -229,7 +228,6 @@ module "otel_collector" {
   grafana_otel_collector_token = data.google_secret_manager_secret_version.grafana_otel_collector_token.secret_data
   grafana_otlp_url             = data.google_secret_manager_secret_version.grafana_otlp_url.secret_data
   grafana_username             = data.google_secret_manager_secret_version.grafana_username.secret_data
-  consul_token                 = var.consul_acl_token_secret
 
   enable_otel_router_metrics = var.enable_otel_router_metrics
   otel_router_grpc_port      = var.otel_router_grpc_port
@@ -247,8 +245,11 @@ module "otel_collector" {
 module "otel_collector_nomad_server" {
   source = "../../modules/job-otel-collector-nomad-server"
 
-  provider_name = "gcp"
-  node_pool     = var.api_node_pool
+  provider_name                 = "gcp"
+  node_pool                     = var.api_node_pool
+  gcp_project_id                = var.gcp_project_id
+  gcp_zone                      = var.gcp_zone
+  nomad_server_discovery_filter = var.nomad_server_discovery_filter
 
   grafana_otel_collector_token = data.google_secret_manager_secret_version.grafana_otel_collector_token.secret_data
   grafana_otlp_url             = data.google_secret_manager_secret_version.grafana_otlp_url.secret_data
@@ -458,7 +459,7 @@ module "monad_worker_autoscaler" {
   tams_capacity_url   = var.monad_worker_autoscaler_tams_capacity_url
   tams_audience       = var.monad_worker_autoscaler_tams_audience
   nomad_token         = var.nomad_acl_token_secret
-  consul_token        = var.consul_acl_token_secret
+  consul_token        = var.consul_worker_autoscaler_token
 }
 
 module "loki" {

@@ -1,4 +1,8 @@
 job "api" {
+  meta {
+    monad_acl_handoff_revision = "1"
+  }
+
   node_pool = "${node_pool}"
   priority = 90
 

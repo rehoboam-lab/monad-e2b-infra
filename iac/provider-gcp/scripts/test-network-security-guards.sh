@@ -164,15 +164,19 @@ test "$(grep -Fc 'terraform_data.os_login_operator_access_guard' \
   "${provider_root}/nomad-cluster/main.tf")" -ge 4
 grep -F 'depends_on = [terraform_data.os_login_operator_access_guard]' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
-for stage in network server api worker build; do
-  grep -F "resource \"terraform_data\" \"network_hardening_rollout_completion_${stage}\"" \
+for resource_suffix in network server_safety server_template server_health api worker build; do
+  grep -F "resource \"terraform_data\" \"network_hardening_rollout_completion_${resource_suffix}\"" \
     "${provider_root}/nomad-cluster/main.tf" >/dev/null
-  grep -F "resource \"terraform_data\" \"network_hardening_rollout_stage_${stage}\"" \
+  grep -F "resource \"terraform_data\" \"network_hardening_rollout_stage_${resource_suffix}\"" \
     "${provider_root}/nomad-cluster/main.tf" >/dev/null
 done
 grep -F 'terraform_data.network_hardening_rollout_stage_network,' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
-grep -F 'terraform_data.network_hardening_rollout_stage_server,' \
+grep -F 'terraform_data.network_hardening_rollout_stage_server_safety,' \
+  "${provider_root}/nomad-cluster/main.tf" >/dev/null
+grep -F 'depends_on = [terraform_data.network_hardening_rollout_stage_server_template]' \
+  "${provider_root}/nomad-cluster/main.tf" >/dev/null
+grep -F 'terraform_data.network_hardening_rollout_stage_server_health,' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
 grep -F 'depends_on = [terraform_data.network_hardening_rollout_stage_api]' \
   "${provider_root}/nomad-cluster/main.tf" >/dev/null
@@ -320,7 +324,7 @@ printf '%s\n' \
   '  type = string' \
   '}' \
   'locals {' \
-  '  stage_rank = { network = 1, server = 2, api = 3, worker = 4, build = 5 }' \
+  '  stage_rank = { network = 1, server-safety = 2, server = 3, server-health = 4, api = 5, worker = 6, build = 7 }' \
   '  stage_number = local.stage_rank[var.stage]' \
   '}' \
   'resource "terraform_data" "guard" {' \
@@ -343,33 +347,63 @@ printf '%s\n' \
   '  input      = "network"' \
   '  depends_on = [terraform_data.completion_network]' \
   '}' \
+  'resource "terraform_data" "server_safety_policy" {' \
+  '  input = "server-safety"' \
+  '}' \
+  'resource "terraform_data" "completion_server_safety" {' \
+  '  count            = local.stage_number >= 2 ? 1 : 0' \
+  '  input            = "server-safety"' \
+  '  triggers_replace = ["server-safety"]' \
+  '  provisioner "local-exec" { command = "true" }' \
+  '  depends_on = [terraform_data.stage_network, terraform_data.server_safety_policy]' \
+  '}' \
+  'resource "terraform_data" "stage_server_safety" {' \
+  '  count      = local.stage_number >= 2 ? 1 : 0' \
+  '  input      = "server-safety"' \
+  '  depends_on = [terraform_data.completion_server_safety]' \
+  '}' \
   'resource "terraform_data" "server_pool" {' \
   '  input = "server"' \
   '}' \
-  'resource "terraform_data" "completion_server" {' \
-  '  count            = local.stage_number >= 2 ? 1 : 0' \
+  'resource "terraform_data" "completion_server_template" {' \
+  '  count            = local.stage_number >= 3 ? 1 : 0' \
   '  input            = "server"' \
   '  triggers_replace = ["server"]' \
   '  provisioner "local-exec" { command = "true" }' \
-  '  depends_on = [terraform_data.stage_network, terraform_data.server_pool]' \
+  '  depends_on = [terraform_data.stage_server_safety, terraform_data.server_pool]' \
   '}' \
-  'resource "terraform_data" "stage_server" {' \
-  '  count      = local.stage_number >= 2 ? 1 : 0' \
+  'resource "terraform_data" "stage_server_template" {' \
+  '  count      = local.stage_number >= 3 ? 1 : 0' \
   '  input      = "server"' \
-  '  depends_on = [terraform_data.completion_server]' \
+  '  depends_on = [terraform_data.completion_server_template]' \
+  '}' \
+  'resource "terraform_data" "server_health_switch" {' \
+  '  input = "server-health"' \
+  '}' \
+  'resource "terraform_data" "completion_server_health" {' \
+  '  count            = local.stage_number >= 4 ? 1 : 0' \
+  '  input            = "server-health"' \
+  '  triggers_replace = ["server-health"]' \
+  '  provisioner "local-exec" { command = "true" }' \
+  '  depends_on = [terraform_data.stage_server_template, terraform_data.server_health_switch]' \
+  '}' \
+  'resource "terraform_data" "stage_server_health" {' \
+  '  count      = local.stage_number >= 4 ? 1 : 0' \
+  '  input      = "server-health"' \
+  '  depends_on = [terraform_data.completion_server_health]' \
   '}' \
   'resource "terraform_data" "api_pool" {' \
   '  input = "api"' \
   '}' \
   'resource "terraform_data" "completion_api" {' \
-  '  count            = local.stage_number >= 3 ? 1 : 0' \
+  '  count            = local.stage_number >= 5 ? 1 : 0' \
   '  input            = "api"' \
   '  triggers_replace = ["api"]' \
   '  provisioner "local-exec" { command = "true" }' \
-  '  depends_on = [terraform_data.stage_server, terraform_data.api_pool]' \
+  '  depends_on = [terraform_data.stage_server_health, terraform_data.api_pool]' \
   '}' \
   'resource "terraform_data" "stage_api" {' \
-  '  count      = local.stage_number >= 3 ? 1 : 0' \
+  '  count      = local.stage_number >= 5 ? 1 : 0' \
   '  input      = "api"' \
   '  depends_on = [terraform_data.completion_api]' \
   '}' \
@@ -378,7 +412,7 @@ printf '%s\n' \
   '  name   = "worker"' \
   '}' \
   'resource "terraform_data" "completion_worker" {' \
-  '  count            = local.stage_number >= 4 ? 1 : 0' \
+  '  count            = local.stage_number >= 6 ? 1 : 0' \
   '  input            = "worker"' \
   '  triggers_replace = ["worker"]' \
   '  provisioner "local-exec" {' \
@@ -388,7 +422,7 @@ printf '%s\n' \
   '  depends_on = [terraform_data.stage_api]' \
   '}' \
   'resource "terraform_data" "stage_worker" {' \
-  '  count      = local.stage_number >= 4 ? 1 : 0' \
+  '  count      = local.stage_number >= 6 ? 1 : 0' \
   '  input      = "worker"' \
   '  depends_on = [terraform_data.completion_worker]' \
   '}' \
@@ -403,7 +437,7 @@ printf '%s\n' \
   '  input = "clickhouse"' \
   '}' \
   'resource "terraform_data" "completion_build" {' \
-  '  count            = local.stage_number >= 5 ? 1 : 0' \
+  '  count            = local.stage_number >= 7 ? 1 : 0' \
   '  input            = "build"' \
   '  triggers_replace = ["build"]' \
   '  provisioner "local-exec" {' \
@@ -417,7 +451,7 @@ printf '%s\n' \
   '  ]' \
   '}' \
   'resource "terraform_data" "stage_build" {' \
-  '  count      = local.stage_number >= 5 ? 1 : 0' \
+  '  count      = local.stage_number >= 7 ? 1 : 0' \
   '  input      = "build"' \
   '  depends_on = [terraform_data.completion_build]' \
   '}' \
@@ -467,27 +501,39 @@ assert_target_closure() {
     'terraform_data.completion_network' \
     'terraform_data.guard' \
     'terraform_data.stage_network')"
-  if [[ "${stage}" =~ ^(server|api|worker|build)$ ]]; then
-    expected="$(printf '%s\n%s\n' "${expected}" \
-      'terraform_data.completion_server[0]' \
+  if [[ "${stage}" =~ ^(server-safety|server|server-health|api|worker|build)$ ]]; then
+    expected="$(printf '%s\n' "${expected}" \
+      'terraform_data.completion_server_safety[0]' \
+      'terraform_data.server_safety_policy' \
+      'terraform_data.stage_server_safety[0]' | sort)"
+  fi
+  if [[ "${stage}" =~ ^(server|server-health|api|worker|build)$ ]]; then
+    expected="$(printf '%s\n' "${expected}" \
+      'terraform_data.completion_server_template[0]' \
       'terraform_data.server_pool' \
-      'terraform_data.stage_server[0]' | sort)"
+      'terraform_data.stage_server_template[0]' | sort)"
+  fi
+  if [[ "${stage}" =~ ^(server-health|api|worker|build)$ ]]; then
+    expected="$(printf '%s\n' "${expected}" \
+      'terraform_data.completion_server_health[0]' \
+      'terraform_data.server_health_switch' \
+      'terraform_data.stage_server_health[0]' | sort)"
   fi
   if [[ "${stage}" =~ ^(api|worker|build)$ ]]; then
-    expected="$(printf '%s\n%s\n' "${expected}" \
+    expected="$(printf '%s\n' "${expected}" \
       'terraform_data.api_pool' \
       'terraform_data.completion_api[0]' \
       'terraform_data.stage_api[0]' | sort)"
   fi
   if [[ "${stage}" =~ ^(worker|build)$ ]]; then
-    expected="$(printf '%s\n%s\n' "${expected}" \
+    expected="$(printf '%s\n' "${expected}" \
       'module.worker.terraform_data.pool' \
       'module.worker.terraform_data.template' \
       'terraform_data.completion_worker[0]' \
       'terraform_data.stage_worker[0]' | sort)"
   fi
   if [[ "${stage}" == "build" ]]; then
-    expected="$(printf '%s\n%s\n' "${expected}" \
+    expected="$(printf '%s\n' "${expected}" \
       'module.build.terraform_data.pool' \
       'module.build.terraform_data.template' \
       'terraform_data.clickhouse_pool' \
@@ -506,7 +552,9 @@ assert_target_closure() {
 }
 
 assert_target_closure network terraform_data.completion_network terraform_data.stage_network
-assert_target_closure server 'terraform_data.completion_server[0]' 'terraform_data.stage_server[0]'
+assert_target_closure server-safety 'terraform_data.completion_server_safety[0]' 'terraform_data.stage_server_safety[0]'
+assert_target_closure server 'terraform_data.completion_server_template[0]' 'terraform_data.stage_server_template[0]'
+assert_target_closure server-health 'terraform_data.completion_server_health[0]' 'terraform_data.stage_server_health[0]'
 assert_target_closure api 'terraform_data.completion_api[0]' 'terraform_data.stage_api[0]'
 assert_target_closure worker 'terraform_data.completion_worker[0]' 'terraform_data.stage_worker[0]'
 assert_target_closure build 'terraform_data.completion_build[0]' 'terraform_data.stage_build[0]'

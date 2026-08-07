@@ -3,6 +3,12 @@ ENV_FILE := ../../.env.${ENV}
 
 -include ${ENV_FILE}
 
+# Nomad provider 2.1.0 falls back from an empty per-job token to the provider's
+# CONSUL_HTTP_TOKEN environment default. The guarded workflow must never let an
+# operator shell reintroduce the retired management identity into every job
+# registration request.
+unexport CONSUL_HTTP_TOKEN
+
 TF := $(shell which terraform)
 GCLOUD := $(shell which gcloud)
 override EXPECTED_TERRAFORM_VERSION := $(shell awk '$$1 == "terraform" { print $$2; exit }' ../../.tool-versions)
@@ -128,16 +134,40 @@ WORKLOAD_CLUSTER_CHECKPOINT ?=
 WORKLOAD_CLUSTER_RECOVERY_TOKEN ?=
 WORKLOAD_CLUSTER_REBOUND_TOKEN ?=
 WORKLOAD_CLUSTER_REFRESH_STAGE ?=
+ACL_RUNTIME_JOB_PHASE ?=
+ACL_RUNTIME_JOB_CHECKPOINT ?=
+ACL_RUNTIME_JOB_RECOVERY_TOKEN ?=
+ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT ?=
+CONSUL_LEGACY_VERSION_RESOURCE ?=
+CONSUL_CANDIDATE_VERSION_RESOURCE ?=
+CONSUL_UNREGISTERED_VERSION_RESOURCE ?=
+CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT ?=
+CONSUL_HANDOFF_EVIDENCE ?= .consul-management-handoff.$(ENV).json
+CONSUL_HANDOFF_BUILD_CHECKPOINT ?=
+override CONSUL_HANDOFF_POST_API_EVIDENCE := .acl-runtime-job.post-api.$(ENV).evidence.json
+override ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE := .acl-runtime-job.pre-server.$(ENV).evidence.json
+CONSUL_HANDOFF_POST_PLAN ?= .tfplan.consul-handoff-post.$(ENV)
+override CONSUL_HANDOFF_POST_PLAN_MANIFEST := $(CONSUL_HANDOFF_POST_PLAN).manifest
+override ACL_RUNTIME_JOB_STAGE_pre-server := network
+override ACL_RUNTIME_JOB_STAGE_post-api := api
+override ACL_RUNTIME_JOB_STAGE := $(ACL_RUNTIME_JOB_STAGE_$(ACL_RUNTIME_JOB_PHASE))
+override ACL_RUNTIME_JOB_PLAN := .tfplan.acl-runtime-job.$(ACL_RUNTIME_JOB_PHASE).$(ENV)
+override ACL_RUNTIME_JOB_PLAN_MANIFEST := $(ACL_RUNTIME_JOB_PLAN).manifest
+override ACL_RUNTIME_JOB_COMPLETION_EVIDENCE := .acl-runtime-job.$(ACL_RUNTIME_JOB_PHASE).$(ENV).evidence.json
 override WORKLOAD_CLUSTER_PLAN := .tfplan.workload-cluster.$(WORKLOAD_CLUSTER_STAGE).$(ENV)
 override WORKLOAD_CLUSTER_PLAN_MANIFEST := $(WORKLOAD_CLUSTER_PLAN).manifest
 override WORKLOAD_CLUSTER_TOPOLOGY_TARGET := -target=module.cluster
 override WORKLOAD_CLUSTER_STAGE_COMPLETION_network := module.cluster.terraform_data.network_hardening_rollout_completion_network
-override WORKLOAD_CLUSTER_STAGE_COMPLETION_server := module.cluster.terraform_data.network_hardening_rollout_completion_server[0]
+override WORKLOAD_CLUSTER_STAGE_COMPLETION_server-safety := module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]
+override WORKLOAD_CLUSTER_STAGE_COMPLETION_server := module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]
+override WORKLOAD_CLUSTER_STAGE_COMPLETION_server-health := module.cluster.terraform_data.network_hardening_rollout_completion_server_health[0]
 override WORKLOAD_CLUSTER_STAGE_COMPLETION_api := module.cluster.terraform_data.network_hardening_rollout_completion_api[0]
 override WORKLOAD_CLUSTER_STAGE_COMPLETION_worker := module.cluster.terraform_data.network_hardening_rollout_completion_worker[0]
 override WORKLOAD_CLUSTER_STAGE_COMPLETION_build := module.cluster.terraform_data.network_hardening_rollout_completion_build[0]
 override WORKLOAD_CLUSTER_STAGE_MARKER_network := module.cluster.terraform_data.network_hardening_rollout_stage_network
-override WORKLOAD_CLUSTER_STAGE_MARKER_server := module.cluster.terraform_data.network_hardening_rollout_stage_server[0]
+override WORKLOAD_CLUSTER_STAGE_MARKER_server-safety := module.cluster.terraform_data.network_hardening_rollout_stage_server_safety[0]
+override WORKLOAD_CLUSTER_STAGE_MARKER_server := module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]
+override WORKLOAD_CLUSTER_STAGE_MARKER_server-health := module.cluster.terraform_data.network_hardening_rollout_stage_server_health[0]
 override WORKLOAD_CLUSTER_STAGE_MARKER_api := module.cluster.terraform_data.network_hardening_rollout_stage_api[0]
 override WORKLOAD_CLUSTER_STAGE_MARKER_worker := module.cluster.terraform_data.network_hardening_rollout_stage_worker[0]
 override WORKLOAD_CLUSTER_STAGE_MARKER_build := module.cluster.terraform_data.network_hardening_rollout_stage_build[0]
@@ -145,6 +175,7 @@ override WORKLOAD_CLUSTER_COMPLETION_ADDRESS := $(WORKLOAD_CLUSTER_STAGE_COMPLET
 override WORKLOAD_CLUSTER_MARKER_ADDRESS := $(WORKLOAD_CLUSTER_STAGE_MARKER_$(WORKLOAD_CLUSTER_STAGE))
 override WORKLOAD_CLUSTER_COMPLETION_REPLACE := -replace='$(WORKLOAD_CLUSTER_COMPLETION_ADDRESS)'
 override WORKLOAD_CLUSTER_COMMON_TARGETS := \
+	-target='module.cluster.terraform_data.acl_bootstrap_environment_guard' \
 	-target='module.cluster.terraform_data.os_login_operator_access_guard' \
 	-target='module.cluster.terraform_data.network_hardening_rollout_completion' \
 	-target='module.cluster.terraform_data.network_hardening_rollout_stage' \
@@ -156,11 +187,25 @@ override WORKLOAD_CLUSTER_STAGE_TARGETS_network := \
 	-target='module.cluster.module.network.google_compute_firewall.iap_remote_connection_firewall_ingress[0]' \
 	-target='module.cluster.module.network.google_compute_firewall.internal_remote_connection_firewall_ingress' \
 	-target='module.cluster.module.network.google_compute_firewall.remote_connection_firewall_ingress'
-override WORKLOAD_CLUSTER_STAGE_TARGETS_server := \
+override WORKLOAD_CLUSTER_STAGE_TARGETS_server-safety := \
 	-target='module.cluster.google_compute_health_check.server_nomad_check' \
+	-target='module.cluster.google_compute_health_check.server_nomad_check_legacy[0]' \
+	-target='module.cluster.google_compute_health_check.server_voter_check' \
+	-target='module.cluster.terraform_data.server_mig_safety_policy[0]'
+override WORKLOAD_CLUSTER_STAGE_TARGETS_server := \
+	-target='module.cluster.google_compute_health_check.server_nomad_check_legacy[0]' \
+	-target='module.cluster.google_compute_health_check.server_voter_check' \
 	-target='module.cluster.google_compute_instance_template.server' \
-	-target='module.cluster.google_compute_region_instance_group_manager.server_pool'
+	-target='module.cluster.google_compute_region_instance_group_manager.server_pool' \
+	-target='module.cluster.terraform_data.consul_management_handoff_candidate[0]'
+override WORKLOAD_CLUSTER_STAGE_TARGETS_server-health := \
+	-target='module.cluster.google_compute_health_check.server_nomad_check_legacy[0]' \
+	-target='module.cluster.google_compute_health_check.server_voter_check' \
+	-target='module.cluster.google_compute_instance_template.server' \
+	-target='module.cluster.google_compute_region_instance_group_manager.server_pool' \
+	-target='module.cluster.terraform_data.consul_management_handoff_candidate[0]'
 override WORKLOAD_CLUSTER_STAGE_TARGETS_api := \
+	-target='module.cluster.google_compute_health_check.server_nomad_check_legacy[0]' \
 	-target='module.cluster.google_compute_instance_template.api' \
 	-target='module.cluster.google_compute_instance_group_manager.api_pool'
 override WORKLOAD_CLUSTER_STAGE_TARGETS_worker := \
@@ -186,7 +231,11 @@ override WORKLOAD_PREREQUISITE_CONFIRMATION := APPLY WORKLOAD PREREQUISITES
 override WORKLOAD_CLUSTER_CONFIRMATION := APPLY NETWORK HARDENING $(WORKLOAD_CLUSTER_STAGE)
 override WORKLOAD_CLUSTER_RECOVERY_CONFIRMATION := RELEASE NETWORK HARDENING LEASE $(WORKLOAD_CLUSTER_STAGE)
 override WORKLOAD_CLUSTER_REBIND_CONFIRMATION := REBIND NETWORK HARDENING LEASE $(WORKLOAD_CLUSTER_STAGE)
+override ACL_RUNTIME_JOB_CONFIRMATION := APPLY ACL RUNTIME JOBS $(ACL_RUNTIME_JOB_PHASE)
+override CONSUL_HANDOFF_CONFIRMATION := PREPARE CONSUL MANAGEMENT HANDOFF
+override CONSUL_HANDOFF_RETIRE_CONFIRMATION := RETIRE CONSUL MANAGEMENT LINEAGE
 override WORKLOAD_PREREQUISITE_TARGETS := \
+	-target='module.init.terraform_data.acl_bootstrap_environment_guard' \
 	-target='google_secret_manager_secret_version.postgres_connection_string' \
 	-target='google_secret_manager_secret_version.postgres_read_replica_connection_string' \
 	-target='google_sql_database_instance.invited_beta' \
@@ -202,6 +251,38 @@ override WORKLOAD_PREREQUISITE_TARGETS := \
 	-target='module.init.google_artifact_registry_repository_iam_member.api_controller_core_reader' \
 	-target='module.init.google_storage_bucket_iam_member.api_controller' \
 	-target='module.init.google_project_iam_member.api_controller' \
+	-target='module.init.google_service_account.nomad_server_service_account' \
+	-target='module.init.google_service_account.data_node_service_account' \
+	-target='module.init.google_secret_manager_secret.consul_acl_token_candidate' \
+	-target='module.init.random_password.consul_acl_token_candidate_seed' \
+	-target='module.init.google_secret_manager_secret_version.consul_acl_token_candidate' \
+	-target='module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member' \
+	-target='module.init.google_artifact_registry_repository_iam_member.data_node_core_reader' \
+	-target='module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam' \
+	-target='module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam' \
+	-target='module.init.google_storage_bucket_iam_member.loki_storage_iam' \
+	-target='module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam' \
+	-target='module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam' \
+	-target='module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam' \
+	-target='module.init.google_project_iam_member.non_api_runtime' \
+	-target='module.cluster.terraform_data.acl_bootstrap_environment_guard' \
+	-target='module.cluster.google_secret_manager_secret.consul_gossip_encryption_key' \
+	-target='module.cluster.random_id.consul_gossip_encryption_key' \
+	-target='module.cluster.google_secret_manager_secret_version.consul_gossip_encryption_key' \
+	-target='module.cluster.google_secret_manager_secret.consul_dns_request_token' \
+	-target='module.cluster.random_uuid.consul_dns_request_token' \
+	-target='module.cluster.google_secret_manager_secret_version.consul_dns_request_token' \
+	-target='module.cluster.google_secret_manager_secret.consul_catalog_read_token' \
+	-target='module.cluster.random_password.consul_catalog_read_token_seed' \
+	-target='module.cluster.google_secret_manager_secret_version.consul_catalog_read_token' \
+	-target='module.cluster.google_secret_manager_secret.consul_nomad_client_sync_token' \
+	-target='module.cluster.random_password.consul_nomad_client_sync_token_seed' \
+	-target='module.cluster.google_secret_manager_secret_version.consul_nomad_client_sync_token' \
+	-target='module.cluster.google_secret_manager_secret.consul_worker_autoscaler_token' \
+	-target='module.cluster.random_password.consul_worker_autoscaler_token_seed' \
+	-target='module.cluster.google_secret_manager_secret_version.consul_worker_autoscaler_token' \
+	-target='module.cluster.google_secret_manager_secret_iam_member.bootstrap_server' \
+	-target='module.cluster.google_secret_manager_secret_iam_member.bootstrap_data' \
 	-target='google_artifact_registry_repository_iam_member.custom_environments_repository_member' \
 	-target='google_artifact_registry_repository_iam_member.custom_environments_repository_api_controller_member'
 WORKLOAD_CLUSTER_WAIT_SECONDS ?= 1800
@@ -294,7 +375,8 @@ workload-cluster-plan-check:
 		fi; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$(WORKLOAD_CLUSTER_PLAN)" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"
 
 workload-plan-assertions-test:
 	@ ./scripts/test-network-hardening-rollout.sh
@@ -358,9 +440,25 @@ keyless-runtime-check:
 	@ ./scripts/test-keyless-runtime-guard.sh
 	@ ./scripts/test-api-controller-identity.sh
 	@ ./scripts/test-configure-docker-gcp.sh
+	@ ./scripts/test-acl-secret-manager-bootstrap.sh
+	@ ./scripts/test-consul-resolver-refresh.sh
+	@ ./scripts/test-consul-agent-token-config.sh
+	@ ./scripts/test-consul-agent-acquire-cleanup.sh
+	@ ./scripts/test-consul-agent-refresh.sh
+	@ ./scripts/test-consul-agent-production-wiring.sh
+	@ ./scripts/test-nomad-consul-boundaries.sh
+	@ ./scripts/test-nomad-consul-sync-integration.sh
+	@ ./scripts/test-consul-management-handoff.sh
+	@ ./scripts/test-consul-handoff-make-wiring.sh
+	@ ./scripts/test-consul-handoff-post-plan.sh
+	@ ./scripts/test-nomad-provider-consul-token-capture.sh "$(TF)"
+	@ ./scripts/test-acl-runtime-job-plan.sh
+	@ ./scripts/test-bootstrap-reboot-fail-closed.sh
+	@ ./scripts/test-role-identity-boundaries.sh
 	@ ./scripts/test-control-plane-secret-logging.sh
 	@ ./scripts/test-nomad-restart-safety.sh
 	@ ./scripts/test-server-voter-health.sh
+	@ ./scripts/test-server-mig-safety.sh
 	@ ./scripts/test-scrub-legacy-acl-token-state.sh
 
 .PHONY: acl-token-state-guard
@@ -399,13 +497,277 @@ workload-context-guard:
 
 .PHONY: workload-cluster-stage-guard
 workload-cluster-stage-guard:
-	@ printf '%s' "$(WORKLOAD_CLUSTER_STAGE)" | grep -Eq '^(network|server|api|worker|build)$$' || (printf "WORKLOAD_CLUSTER_STAGE must be one of network, server, api, worker, or build.\n"; exit 1)
+	@ printf '%s' "$(WORKLOAD_CLUSTER_STAGE)" | grep -Eq '^(network|server-safety|server|server-health|api|worker|build)$$' || (printf "WORKLOAD_CLUSTER_STAGE must be one of network, server-safety, server, server-health, api, worker, or build.\n"; exit 1)
 	@ test -z "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" || test "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" = "$(WORKLOAD_CLUSTER_STAGE)" || (printf "WORKLOAD_CLUSTER_REFRESH_STAGE must be empty or exactly match WORKLOAD_CLUSTER_STAGE.\n"; exit 1)
 	@ test -z "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" || test -z "$(WORKLOAD_CLUSTER_RECOVERY_TOKEN)" || (printf "A planned same-stage refresh cannot borrow a recovery lease.\n"; exit 1)
 	@ test "$(OS_LOGIN_OPERATOR_ACCESS_CONFIRMED)" = "true" || (printf "OS_LOGIN_OPERATOR_ACCESS_CONFIRMED=true is required after proving IAP and OS Login access.\n"; exit 1)
 	@ ./scripts/assert-network-hardening-checkpoint.sh \
 		"$(WORKLOAD_CLUSTER_STAGE)" "$(WORKLOAD_CLUSTER_CHECKPOINT)" \
 		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+	@ case "$(WORKLOAD_CLUSTER_STAGE)" in \
+		server|server-health|api|worker|build) \
+			$(MAKE) --no-print-directory acl-runtime-job-pre-server-evidence-guard ;; \
+		*) ;; \
+	esac
+	@ case "$(WORKLOAD_CLUSTER_STAGE)" in \
+		server|server-health|api|worker|build) \
+				test -n "$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+				&& test -n "$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+				&& test -n "$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+				&& test -n "$(CONSUL_HANDOFF_EVIDENCE)" \
+				&& test -n "$(CONSUL_HANDOFF_POST_PLAN)" \
+				|| { printf "Server-and-later stages require exact Consul legacy/candidate/unregistered-version classification and handoff evidence.\n"; exit 1; }; \
+			test -f "$(CONSUL_HANDOFF_POST_PLAN)" && test ! -L "$(CONSUL_HANDOFF_POST_PLAN)" \
+				|| { printf "Server-and-later stages require the reviewed Consul post-handoff Terraform plan.\n"; exit 1; }; \
+			test -f "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)" && test ! -L "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)" \
+				|| { printf "Server-and-later stages require Consul post-handoff plan provenance.\n"; exit 1; }; \
+			$(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh verify \
+				"$(CONSUL_HANDOFF_POST_PLAN)" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)" \
+				"$(TF)" "." "../.."; \
+			./scripts/assert-consul-handoff-post-plan.sh \
+				"$(CONSUL_HANDOFF_POST_PLAN)" "$(TF)" "$(CONSUL_HANDOFF_EVIDENCE)"; \
+			terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+			terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+			terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+			handoff_status="$$(jq -er '.status' "$(CONSUL_HANDOFF_EVIDENCE)")"; \
+			case "$$handoff_status" in \
+				staged) handoff_mode=verify-staged ;; \
+				retired) handoff_mode=verify ;; \
+				*) printf "Unknown Consul handoff evidence status: %s\n" "$$handoff_status" >&2; exit 1 ;; \
+			esac; \
+			GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+			GCP_REGION="$(GCP_REGION)" \
+			PREFIX="$(PREFIX)" \
+			CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+			CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+			CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+			CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+			CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+			CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+			CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+			CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+			GCLOUD_BIN="$(GCLOUD)" \
+			./scripts/consul-management-handoff.sh "$$handoff_mode" ;; \
+		*) ;; \
+	esac
+
+.PHONY: consul-management-handoff-stage consul-management-handoff-verify-staged consul-management-handoff-retire consul-management-handoff-verify consul-management-handoff-post-plan
+consul-management-handoff-stage:
+	@ if [ "$(CONFIRM)" != "$(CONSUL_HANDOFF_CONFIRMATION)" ]; then \
+		printf "Refusing Consul management handoff. Re-run with CONFIRM='%s'.\n" "$(CONSUL_HANDOFF_CONFIRMATION)"; \
+		exit 1; \
+	fi
+	@ $(MAKE) workload-context-guard acl-runtime-job-pre-server-evidence-guard
+	@ test "$(TERRAFORM_ENVIRONMENT)" = "dev" || (printf "Consul management handoff is restricted to the dev invited-beta fleet.\n"; exit 1)
+	@ test -n "$(CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT)" || (printf "CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT must name the reviewed server-safety checkpoint.\n"; exit 1)
+	@ ./scripts/assert-network-hardening-checkpoint.sh \
+		"server-safety" "$(CONSUL_HANDOFF_PREREQUISITE_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+		GCP_REGION="$(GCP_REGION)" \
+		PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_PRE_SERVER_ACL_EVIDENCE="$(ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE)" \
+		CONSUL_HANDOFF_ENVIRONMENT="$(TERRAFORM_ENVIRONMENT)" \
+		CONSUL_HANDOFF_NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
+		CONSUL_HANDOFF_NOMAD_BASE_URL="https://nomad.$(DOMAIN_NAME)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh stage
+
+consul-management-handoff-verify-staged:
+	@ $(MAKE) workload-context-guard
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" GCP_REGION="$(GCP_REGION)" PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh verify-staged
+
+consul-management-handoff-retire:
+	@ if [ "$(CONFIRM)" != "$(CONSUL_HANDOFF_RETIRE_CONFIRMATION)" ]; then \
+		printf "Refusing Consul management retirement. Re-run with CONFIRM='%s' and the evidence-bound CONSUL_RETIRE_CONFIRMATION.\n" "$(CONSUL_HANDOFF_RETIRE_CONFIRMATION)"; \
+		exit 1; \
+	fi
+	@ $(MAKE) workload-context-guard
+	@ test -n "$(CONSUL_HANDOFF_BUILD_CHECKPOINT)" || (printf "CONSUL_HANDOFF_BUILD_CHECKPOINT is required.\n"; exit 1)
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" GCP_REGION="$(GCP_REGION)" PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_POST_API_EVIDENCE="$(CONSUL_HANDOFF_POST_API_EVIDENCE)" \
+		CONSUL_HANDOFF_BUILD_CHECKPOINT="$(CONSUL_HANDOFF_BUILD_CHECKPOINT)" \
+		CONSUL_HANDOFF_NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
+		CONSUL_HANDOFF_NOMAD_BASE_URL="https://nomad.$(DOMAIN_NAME)" \
+		CONSUL_RETIRE_CONFIRMATION="$(CONSUL_RETIRE_CONFIRMATION)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		CONSUL_HANDOFF_REPO_ROOT="../.." GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh retire
+
+consul-management-handoff-verify:
+	@ $(MAKE) workload-context-guard
+	@ terraform_active_version="$$($(TF) output -raw consul_acl_token_secret_version_name)"; \
+		terraform_legacy_version="$$($(TF) output -raw consul_acl_token_legacy_secret_version_name)"; \
+		terraform_candidate_version="$$($(TF) output -raw consul_acl_token_candidate_secret_version_name)"; \
+		GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+		GCP_REGION="$(GCP_REGION)" \
+		PREFIX="$(PREFIX)" \
+		CONSUL_LEGACY_VERSION_RESOURCE="$(CONSUL_LEGACY_VERSION_RESOURCE)" \
+		CONSUL_CANDIDATE_VERSION_RESOURCE="$(CONSUL_CANDIDATE_VERSION_RESOURCE)" \
+		CONSUL_UNREGISTERED_VERSION_RESOURCE="$(CONSUL_UNREGISTERED_VERSION_RESOURCE)" \
+		CONSUL_TERRAFORM_ACTIVE_VERSION_RESOURCE="$$terraform_active_version" \
+		CONSUL_TERRAFORM_LEGACY_VERSION_RESOURCE="$$terraform_legacy_version" \
+		CONSUL_TERRAFORM_CANDIDATE_VERSION_RESOURCE="$$terraform_candidate_version" \
+		CONSUL_HANDOFF_EVIDENCE="$(CONSUL_HANDOFF_EVIDENCE)" \
+		CONSUL_HANDOFF_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		GCLOUD_BIN="$(GCLOUD)" \
+		./scripts/consul-management-handoff.sh verify
+
+consul-management-handoff-post-plan:
+	@ $(MAKE) workload-context-guard consul-management-handoff-verify-staged
+	@ rm -f -- "$(CONSUL_HANDOFF_POST_PLAN)" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)"
+	@ set -eu; \
+		temp_dir="$$(mktemp -d ".consul-handoff-post-plan.$(ENV).XXXXXX")"; \
+		temp_plan="$${temp_dir}/plan"; \
+		temp_manifest="$${temp_dir}/manifest"; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT; \
+			rm -rf -- "$${temp_dir}"; \
+			exit "$${status}"; \
+		}; \
+		trap cleanup EXIT; \
+		trap 'exit 129' HUP; \
+		trap 'exit 130' INT; \
+		trap 'exit 143' TERM; \
+		umask 077; \
+		before_fingerprint="$$($(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh fingerprint \
+			"$(TF)" "." "../..")"; \
+		$(tf_vars) $(TF) plan $(TF_VAR_FILE_ARG) \
+			-target='module.init.google_secret_manager_secret_version.consul_acl_token_active' \
+			-target='module.init.google_secret_manager_secret_version.consul_acl_token_legacy' \
+			-target='module.init.google_secret_manager_secret_version.consul_acl_token_candidate' \
+			-out="$${temp_plan}" \
+			-input=false \
+			-compact-warnings; \
+		chmod 0600 "$${temp_plan}"; \
+		after_fingerprint="$$($(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh fingerprint \
+			"$(TF)" "." "../..")"; \
+		test "$${before_fingerprint}" = "$${after_fingerprint}" || { \
+			printf "Refusing Consul post-handoff plan: configuration changed while Terraform was planning.\n" >&2; \
+			exit 1; \
+		}; \
+		./scripts/assert-consul-handoff-post-plan.sh \
+			"$${temp_plan}" "$(TF)" "$(CONSUL_HANDOFF_EVIDENCE)"; \
+		$(foundation_metadata_context) ./scripts/foundation-plan-metadata.sh write \
+			"$${temp_plan}" "$${temp_manifest}" "$(TF)" "." "../.." "$${after_fingerprint}"; \
+		mv "$${temp_plan}" "$(CONSUL_HANDOFF_POST_PLAN)"; \
+		mv "$${temp_manifest}" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)"; \
+		rmdir "$${temp_dir}"; \
+		trap - EXIT; \
+		trap - HUP INT TERM
+	@ printf "Saved read-only Consul post-handoff plan and provenance for server-stage review: %s and %s\n" \
+		"$(CONSUL_HANDOFF_POST_PLAN)" "$(CONSUL_HANDOFF_POST_PLAN_MANIFEST)"
+
+.PHONY: acl-runtime-job-pre-server-evidence-guard acl-runtime-job-phase-guard acl-runtime-job-plan acl-runtime-job-apply
+acl-runtime-job-pre-server-evidence-guard:
+	@ test -n "$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" || (printf "ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT must name the exact reviewed network checkpoint.\n"; exit 1)
+	@ ./scripts/assert-network-hardening-checkpoint.sh \
+		"network" "$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+	@ ./scripts/assert-acl-runtime-job-evidence.sh \
+		"$(ACL_RUNTIME_JOB_PRE_SERVER_EVIDENCE)" "pre-server" "$(TERRAFORM_ENVIRONMENT)" \
+		"$(ACL_RUNTIME_JOB_PRE_SERVER_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+
+acl-runtime-job-phase-guard:
+	@ printf '%s' "$(ACL_RUNTIME_JOB_PHASE)" | grep -Eq '^(pre-server|post-api)$$' || (printf "ACL_RUNTIME_JOB_PHASE must be pre-server or post-api.\n"; exit 1)
+	@ test "$(TERRAFORM_ENVIRONMENT)" = "dev" || (printf "ACL runtime-job handoff is restricted to the dev invited-beta fleet.\n"; exit 1)
+	@ test -n "$(ACL_RUNTIME_JOB_CHECKPOINT)" || (printf "ACL_RUNTIME_JOB_CHECKPOINT must name the reviewed %s checkpoint.\n" "$(ACL_RUNTIME_JOB_STAGE)"; exit 1)
+	@ ./scripts/assert-network-hardening-checkpoint.sh \
+		"$(ACL_RUNTIME_JOB_STAGE)" "$(ACL_RUNTIME_JOB_CHECKPOINT)" \
+		"$(GCP_PROJECT_ID)" "$(GCP_REGION)" "$(GCP_ZONE)" "$(PREFIX)" "../.."
+
+acl-runtime-job-plan:
+	@ $(MAKE) workload-context-guard acl-runtime-job-phase-guard
+	@ $(call tf_fmt)
+	@ $(tf_vars) TF_VAR_network_hardening_rollout_stage="$(ACL_RUNTIME_JOB_STAGE)" \
+		ACL_RUNTIME_JOB_PHASE="$(ACL_RUNTIME_JOB_PHASE)" \
+		ACL_RUNTIME_JOB_ENV="$(ENV)" \
+		ACL_RUNTIME_JOB_ENV_FILE="$(ENV_FILE)" \
+		ACL_RUNTIME_JOB_TF_VAR_FILE="$(TF_VAR_FILE)" \
+		ACL_RUNTIME_JOB_PLAN="$(ACL_RUNTIME_JOB_PLAN)" \
+		ACL_RUNTIME_JOB_PLAN_MANIFEST="$(ACL_RUNTIME_JOB_PLAN_MANIFEST)" \
+		ACL_RUNTIME_JOB_COMPLETION_EVIDENCE="$(ACL_RUNTIME_JOB_COMPLETION_EVIDENCE)" \
+		ACL_RUNTIME_JOB_CHECKPOINT="$(ACL_RUNTIME_JOB_CHECKPOINT)" \
+		ACL_RUNTIME_JOB_TERRAFORM_BIN="$(TF)" \
+		ACL_RUNTIME_JOB_GCLOUD_BIN="$(GCLOUD)" \
+		ACL_RUNTIME_JOB_GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+		ACL_RUNTIME_JOB_GCP_REGION="$(GCP_REGION)" \
+		ACL_RUNTIME_JOB_GCP_ZONE="$(GCP_ZONE)" \
+		ACL_RUNTIME_JOB_PREFIX="$(PREFIX)" \
+		ACL_RUNTIME_JOB_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		ACL_RUNTIME_JOB_STATE_PREFIX="$(TERRAFORM_STATE_PREFIX)" \
+		ACL_RUNTIME_JOB_CORE_IMAGE_REVISION="$(WORKLOAD_IMAGE_REVISION)" \
+		ACL_RUNTIME_JOB_BINARY_BUCKET="$(WORKLOAD_JOB_BINARY_BUCKET)" \
+		ACL_RUNTIME_JOB_TOPOLOGY_POLICY="$(WORKLOAD_TOPOLOGY_POLICY)" \
+		ACL_RUNTIME_JOB_PACKER_TEMPLATE="$(WORKLOAD_PACKER_TEMPLATE)" \
+		ACL_RUNTIME_JOB_REPO_ROOT="../.." \
+		./scripts/acl-runtime-job-stage.sh plan
+
+acl-runtime-job-apply:
+	@ if [ "$(CONFIRM)" != "$(ACL_RUNTIME_JOB_CONFIRMATION)" ]; then \
+		printf "Refusing ACL runtime-job apply. Re-run with CONFIRM='%s'.\n" "$(ACL_RUNTIME_JOB_CONFIRMATION)"; \
+		exit 1; \
+	fi
+	@ $(MAKE) workload-context-guard acl-runtime-job-phase-guard
+	@ $(tf_vars) TF_VAR_network_hardening_rollout_stage="$(ACL_RUNTIME_JOB_STAGE)" \
+		ACL_RUNTIME_JOB_PHASE="$(ACL_RUNTIME_JOB_PHASE)" \
+		ACL_RUNTIME_JOB_ENV="$(ENV)" \
+		ACL_RUNTIME_JOB_ENV_FILE="$(ENV_FILE)" \
+		ACL_RUNTIME_JOB_TF_VAR_FILE="$(TF_VAR_FILE)" \
+		ACL_RUNTIME_JOB_PLAN="$(ACL_RUNTIME_JOB_PLAN)" \
+		ACL_RUNTIME_JOB_PLAN_MANIFEST="$(ACL_RUNTIME_JOB_PLAN_MANIFEST)" \
+		ACL_RUNTIME_JOB_COMPLETION_EVIDENCE="$(ACL_RUNTIME_JOB_COMPLETION_EVIDENCE)" \
+		ACL_RUNTIME_JOB_CHECKPOINT="$(ACL_RUNTIME_JOB_CHECKPOINT)" \
+		ACL_RUNTIME_JOB_RECOVERY_TOKEN="$(ACL_RUNTIME_JOB_RECOVERY_TOKEN)" \
+		ACL_RUNTIME_JOB_TERRAFORM_BIN="$(TF)" \
+		ACL_RUNTIME_JOB_GCLOUD_BIN="$(GCLOUD)" \
+		ACL_RUNTIME_JOB_GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+		ACL_RUNTIME_JOB_GCP_REGION="$(GCP_REGION)" \
+		ACL_RUNTIME_JOB_GCP_ZONE="$(GCP_ZONE)" \
+		ACL_RUNTIME_JOB_PREFIX="$(PREFIX)" \
+		ACL_RUNTIME_JOB_STATE_BUCKET="$(TERRAFORM_STATE_BUCKET)" \
+		ACL_RUNTIME_JOB_STATE_PREFIX="$(TERRAFORM_STATE_PREFIX)" \
+		ACL_RUNTIME_JOB_CORE_IMAGE_REVISION="$(WORKLOAD_IMAGE_REVISION)" \
+		ACL_RUNTIME_JOB_BINARY_BUCKET="$(WORKLOAD_JOB_BINARY_BUCKET)" \
+		ACL_RUNTIME_JOB_TOPOLOGY_POLICY="$(WORKLOAD_TOPOLOGY_POLICY)" \
+		ACL_RUNTIME_JOB_PACKER_TEMPLATE="$(WORKLOAD_PACKER_TEMPLATE)" \
+		ACL_RUNTIME_JOB_REPO_ROOT="../.." \
+		./scripts/acl-runtime-job-stage.sh apply
 
 .PHONY: workload-cluster-plan workload-cluster-apply workload-cluster-rebind-recovery-source workload-cluster-recover-lease workload-cluster-wait workload-prerequisite-plan workload-prerequisite-apply workload-plan workload-apply
 workload-cluster-plan:
@@ -509,7 +871,8 @@ workload-cluster-plan:
 			"$${after_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$${temp_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"; \
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${topology_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \
@@ -667,7 +1030,8 @@ workload-cluster-apply:
 			"$${before_artifacts}" cluster; \
 		./scripts/assert-network-hardening-stage-plan.sh \
 			"$${apply_plan}" "$(TF)" "$(WORKLOAD_CLUSTER_STAGE)" \
-			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)"; \
+			"$${recovery_stage}" "$(WORKLOAD_CLUSTER_REFRESH_STAGE)" \
+			"$(GCP_PROJECT_ID)" "$(PREFIX)"; \
 		quota_mode="$$(./scripts/select-workload-quota-mode.sh \
 			"$${topology_plan}" "$(TF)" "$(WORKLOAD_TOPOLOGY_POLICY)")"; \
 		./scripts/assert-workload-quota.sh \
@@ -697,6 +1061,7 @@ workload-cluster-apply:
 			GCP_ZONE="$(GCP_ZONE)" \
 			DOMAIN_NAME="$(DOMAIN_NAME)" \
 			PREFIX="$(PREFIX)" \
+			NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
 			NETWORK_HARDENING_ROLLOUT_STAGE="$(WORKLOAD_CLUSTER_STAGE)" \
 			NETWORK_HARDENING_WAIT_SECONDS="$(NETWORK_HARDENING_ROLLOUT_WAIT_SECONDS)" \
 			GCLOUD_BIN="$(GCLOUD)" \
@@ -785,6 +1150,7 @@ workload-cluster-recover-lease:
 			GCP_ZONE="$(GCP_ZONE)" \
 			DOMAIN_NAME="$(DOMAIN_NAME)" \
 			PREFIX="$(PREFIX)" \
+			NOMAD_TOKEN_SECRET_VERSION="$$($(TF) output -raw nomad_acl_token_secret_version_name)" \
 			NETWORK_HARDENING_ROLLOUT_STAGE="$(WORKLOAD_CLUSTER_STAGE)" \
 			NETWORK_HARDENING_WAIT_SECONDS="$(NETWORK_HARDENING_ROLLOUT_WAIT_SECONDS)" \
 			GCLOUD_BIN="$(GCLOUD)" \

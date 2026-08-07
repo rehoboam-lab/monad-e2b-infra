@@ -265,7 +265,7 @@ identity_json() {
       exit 1
     fi
     case "${WORKLOAD_CLUSTER_STAGE}" in
-      network | server | api | worker | build) ;;
+      network | server-safety | server | server-health | api | worker | build) ;;
       *)
         printf 'Invalid cluster rollout stage in provenance context: %s\n' \
           "${WORKLOAD_CLUSTER_STAGE}" >&2

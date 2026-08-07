@@ -1,20 +1,70 @@
 locals {
   server_pool_name = "${var.prefix}${var.server_cluster_name}"
+  server_safety_policy_enabled = (
+    var.environment != "dev"
+    || local.network_hardening_stage_number >= local.network_hardening_stage_order["server-safety"]
+  )
+  server_strict_health_enabled = (
+    var.environment != "dev"
+    || local.network_hardening_stage_number >= local.network_hardening_stage_order["server-health"]
+  )
+  server_preserve_current_template = (
+    var.environment == "dev"
+    && local.network_hardening_stage_number < local.network_hardening_stage_order.server
+  )
   server_startup_script = templatefile("${path.module}/scripts/start-server.sh", {
-    NUM_SERVERS                  = var.server_cluster_size
-    CLUSTER_TAG_NAME             = var.cluster_tag_name
-    SCRIPTS_BUCKET               = var.cluster_setup_bucket_name
-    NOMAD_TOKEN                  = var.nomad_acl_token_secret
-    CONSUL_TOKEN                 = var.consul_acl_token_secret
-    RUN_CONSUL_FILE_HASH         = local.file_hash["scripts/run-consul.sh"]
-    RUN_NOMAD_FILE_HASH          = local.file_hash["scripts/run-nomad.sh"]
-    NOMAD_VOTER_HEALTH_SCRIPT    = file("${path.module}/scripts/nomad-voter-health.py")
-    CONSUL_GOSSIP_ENCRYPTION_KEY = google_secret_manager_secret_version.consul_gossip_encryption_key.secret_data
+    NUM_SERVERS                                = var.server_cluster_size
+    CLUSTER_TAG_NAME                           = var.cluster_tag_name
+    NOMAD_SERVER_TAG_NAME                      = local.nomad_server_tag_name
+    SCRIPTS_BUCKET                             = var.cluster_setup_bucket_name
+    NOMAD_TOKEN_SECRET_NAME                    = var.nomad_acl_token_secret_version_name
+    CONSUL_TOKEN_CANDIDATE_SECRET_NAME         = var.consul_acl_token_candidate_secret_version_name
+    FETCH_GCP_SECRET_FILE_HASH                 = local.file_hash["scripts/fetch-gcp-secret.sh"]
+    RUN_CONSUL_FILE_HASH                       = local.file_hash["scripts/run-consul.sh"]
+    CONSUL_GCE_AGENT_FILE_HASH                 = local.file_hash["scripts/consul-gce-agent-identity.sh"]
+    RUN_NOMAD_FILE_HASH                        = local.file_hash["scripts/run-nomad.sh"]
+    NOMAD_VOTER_HEALTH_SCRIPT                  = file("${path.module}/scripts/nomad-voter-health.py")
+    CONSUL_GOSSIP_SECRET_NAME                  = local.consul_gossip_secret_version_name
+    CONSUL_DNS_TOKEN_SECRET_NAME               = local.consul_catalog_read_secret_version_name
+    CONSUL_NOMAD_CLIENT_TOKEN_SECRET_NAME      = local.consul_nomad_client_sync_secret_version_name
+    CONSUL_WORKER_AUTOSCALER_TOKEN_SECRET_NAME = local.consul_worker_autoscaler_secret_version_name
+    CONSUL_GCE_AGENT_SERVICE_ACCOUNTS = join(",", sort(distinct([
+      var.nomad_server_service_account_email,
+      var.api_controller_service_account_email,
+      var.data_node_service_account_email,
+    ])))
   })
 }
 
-resource "google_compute_health_check" "server_nomad_check" {
+# Preserve the health check currently attached to the live MIG unchanged while
+# the server image is replaced. Old instances do not run the voter sidecar, so
+# mutating this resource in place would mark the entire old quorum unhealthy
+# while its live MIG still permits auto-repair. It is retired only after the
+# subsequent API-stage checkpoint proves the server rollout converged.
+resource "google_compute_health_check" "server_nomad_check_legacy" {
+  count = local.network_hardening_stage_number < local.network_hardening_stage_order.api ? 1 : 0
+
   name                = "${local.server_pool_name}-nomad-check"
+  check_interval_sec  = 5
+  timeout_sec         = 5
+  healthy_threshold   = 2
+  unhealthy_threshold = 10 # 50 seconds
+
+  http_health_check {
+    request_path = "/v1/agent/health"
+    port         = var.nomad_port
+  }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
+}
+
+moved {
+  from = google_compute_health_check.server_nomad_check
+  to   = google_compute_health_check.server_nomad_check_legacy[0]
+}
+
+resource "google_compute_health_check" "server_voter_check" {
+  name                = "${local.server_pool_name}-voter-check"
   check_interval_sec  = 5
   timeout_sec         = 5
   healthy_threshold   = 2
@@ -27,10 +77,26 @@ resource "google_compute_health_check" "server_nomad_check" {
     request_path = "/healthz"
     port         = 50001
   }
+
+  depends_on = [terraform_data.acl_bootstrap_environment_guard]
 }
 
 data "google_compute_zones" "region_zones" {
   region = var.gcp_region
+}
+
+# During the safety-only phase, bind the MIG to the exact template already
+# running in GCE. This phase may change only updater/repair policy and create
+# the still-unattached strict voter check. The following server phase removes
+# this data dependency and rolls the newly rendered template under the legacy
+# 4646 health check.
+data "google_compute_region_instance_group_manager" "server_pool_current" {
+  provider = google-beta
+  count    = local.server_preserve_current_template ? 1 : 0
+
+  project = var.gcp_project_id
+  region  = var.gcp_region
+  name    = "${local.server_pool_name}-rig"
 }
 
 resource "google_compute_region_instance_group_manager" "server_pool" {
@@ -53,7 +119,11 @@ resource "google_compute_region_instance_group_manager" "server_pool" {
   )
 
   version {
-    instance_template = google_compute_instance_template.server.id
+    instance_template = (
+      local.server_preserve_current_template
+      ? data.google_compute_region_instance_group_manager.server_pool_current[0].version[0].instance_template
+      : google_compute_instance_template.server.id
+    )
   }
 
   named_port {
@@ -80,10 +150,10 @@ resource "google_compute_region_instance_group_manager" "server_pool" {
     // quorum while the new servers stabilize. One surge with zero unavailable
     // serializes the rollout around a fourth server instead. Non-dev retains
     // the upstream no-unavailability, one-per-zone surge.
-    max_unavailable_fixed = 0
+    max_unavailable_fixed = local.server_safety_policy_enabled ? 0 : 1
     max_surge_fixed = (
       var.environment == "dev"
-      ? 1
+      ? (local.server_safety_policy_enabled ? 1 : 0)
       : length(data.google_compute_zones.region_zones.names)
     )
 
@@ -93,7 +163,11 @@ resource "google_compute_region_instance_group_manager" "server_pool" {
   }
 
   auto_healing_policies {
-    health_check      = google_compute_health_check.server_nomad_check.id
+    health_check = (
+      local.server_strict_health_enabled
+      ? google_compute_health_check.server_voter_check.id
+      : google_compute_health_check.server_nomad_check_legacy[0].id
+    )
     initial_delay_sec = 120
   }
 
@@ -105,7 +179,11 @@ resource "google_compute_region_instance_group_manager" "server_pool" {
   instance_lifecycle_policy {
     default_action_on_failure = "REPAIR"
     force_update_on_repair    = "NO"
-    on_failed_health_check    = "DO_NOTHING"
+    on_failed_health_check = (
+      local.server_safety_policy_enabled
+      ? "DO_NOTHING"
+      : "DEFAULT_ACTION"
+    )
   }
 
   lifecycle {
@@ -113,7 +191,9 @@ resource "google_compute_region_instance_group_manager" "server_pool" {
   }
 
   depends_on = [
-    google_compute_instance_template.server,
+    terraform_data.acl_bootstrap_environment_guard,
+    google_compute_health_check.server_nomad_check_legacy,
+    google_compute_health_check.server_voter_check,
   ]
 }
 
@@ -128,7 +208,7 @@ resource "google_compute_instance_template" "server" {
   instance_description = null
   machine_type         = var.server_machine_type
 
-  tags                    = [var.cluster_tag_name]
+  tags                    = [var.cluster_tag_name, local.nomad_server_tag_name]
   metadata_startup_script = local.server_startup_script
   metadata = merge({
     enable-osconfig         = "TRUE",
@@ -138,6 +218,12 @@ resource "google_compute_instance_template" "server" {
 
   labels = merge(
     var.labels,
+    {
+      # Prometheus GCE service discovery supports exact label filters; the
+      # Compute API rejects tags.items filters. Keep this role marker unique to
+      # the deployment prefix and immutable across template replacements.
+      monad_role = local.nomad_server_role_label
+    },
     (var.environment != "dev" ? {
       goog-ops-agent-policy = "v2-x86-template-1-2-0-${var.gcp_zone}"
     } : {})
@@ -165,7 +251,7 @@ resource "google_compute_instance_template" "server" {
   }
 
   service_account {
-    email = var.google_service_account_email
+    email = var.nomad_server_service_account_email
     scopes = [
       "userinfo-email",
       "compute-ro",
@@ -184,8 +270,12 @@ resource "google_compute_instance_template" "server" {
   }
 
   depends_on = [
+    terraform_data.acl_bootstrap_environment_guard,
     terraform_data.os_login_operator_access_guard,
+    google_secret_manager_secret_iam_member.bootstrap_server,
+    google_storage_bucket_object.setup_config_objects["scripts/fetch-gcp-secret.sh"],
     google_storage_bucket_object.setup_config_objects["scripts/run-nomad.sh"],
-    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"]
+    google_storage_bucket_object.setup_config_objects["scripts/run-consul.sh"],
+    google_storage_bucket_object.setup_config_objects["scripts/consul-gce-agent-identity.sh"],
   ]
 }

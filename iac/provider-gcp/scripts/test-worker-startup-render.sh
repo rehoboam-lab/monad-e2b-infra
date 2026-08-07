@@ -6,7 +6,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 provider_dir="$(cd "${script_dir}/.." && pwd)"
 template_path="${provider_dir}/nomad-cluster/scripts/start-client.sh"
 nodepool_path="${provider_dir}/nomad-cluster/worker-cluster/nodepool.tf"
-cluster_path="${provider_dir}/nomad-cluster/main.tf"
 environment_template="${provider_dir}/../../.env.gcp.template"
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "${test_dir}"' EXIT
@@ -46,14 +45,16 @@ canary_swap_size_gb="$(
 
 render_startup() {
   local swap_size_gb="$1"
-  local set_orchestrator_version_metadata="$2"
-  local output_path="$3"
+  local output_path="$2"
   local config_path="${test_dir}/main.tf"
 
   cat >"${config_path}" <<EOF
 locals {
   startup = templatefile("${template_path}", {
-    CLUSTER_TAG_NAME = "test-cluster"
+    NOMAD_SERVER_TAG_NAME = "test-nomad-server"
+    CONSUL_SERVER_MIG_NAME = "test-server-rig"
+    CONSUL_SERVER_ROLE_LABEL = "test-nomad-server"
+    CONSUL_SERVER_SERVICE_ACCOUNT = "server@test.iam.gserviceaccount.com"
     SCRIPTS_BUCKET = "scripts"
     FC_KERNELS_BUCKET_NAME = "kernels"
     FC_VERSIONS_BUCKET_NAME = "versions"
@@ -61,13 +62,9 @@ locals {
     FC_BUSYBOX_BUCKET_NAME = "busybox"
     DOCKER_CONTEXTS_BUCKET_NAME = "docker"
     GCP_REGION = "us-east4"
-    NOMAD_TOKEN = "nomad-token"
-    CONSUL_TOKEN = "consul-token"
+    REFRESH_CONSUL_RESOLVERS_FILE_HASH = "resolver-hash"
     CONFIGURE_DOCKER_FILE_HASH = "docker-hash"
-    RUN_CONSUL_FILE_HASH = "consul-hash"
     RUN_NOMAD_FILE_HASH = "nomad-hash"
-    CONSUL_GOSSIP_ENCRYPTION_KEY = "gossip-key"
-    CONSUL_DNS_REQUEST_TOKEN = "dns-token"
     NFS_IP_ADDRESS = ""
     NFS_MOUNT_PATH = "/mnt/nfs"
     NFS_MOUNT_SUBDIR = "cache"
@@ -78,7 +75,6 @@ locals {
     CACHE_DISK_COUNT = 1
     LOCAL_SSD = "true"
     SWAP_SIZE_GB = ${swap_size_gb}
-    SET_ORCHESTRATOR_VERSION_METADATA = "${set_orchestrator_version_metadata}"
     NODE_LABELS = ""
     PERSISTENT_VOLUME_TYPES = {}
   })
@@ -92,21 +88,32 @@ EOF
 }
 
 dev_render="${test_dir}/dev-startup.sh"
-nondev_render="${test_dir}/nondev-startup.sh"
-render_startup "${canary_swap_size_gb}" "false" "${dev_render}"
-render_startup 48 "true" "${nondev_render}"
+render_startup "${canary_swap_size_gb}" "${dev_render}"
 
 bash -n "${dev_render}"
-bash -n "${nondev_render}"
+
+if grep -F -e 'projects/test/secrets/nomad' -e 'fetch-gcp-secret' "${dev_render}" >/dev/null; then
+  printf 'Worker startup must not receive or fetch a management secret.\n' >&2
+  exit 1
+fi
+grep -F 'install_setup_script refresh-consul-resolvers "resolver-hash" /opt/e2b/bin/refresh-consul-resolvers.sh' \
+  "${dev_render}" >/dev/null
+grep -F -- '--nomad-server-tag-name "test-nomad-server"' "${dev_render}" >/dev/null
+grep -F 'refresh-consul-resolvers.timer' "${dev_render}" >/dev/null
+grep -F 'host consul.service.consul' "${dev_render}" >/dev/null
+if grep -F -e 'projects/test/secrets/consul' -e 'projects/test/secrets/gossip' \
+  -e 'projects/test/secrets/dns' -e '--consul-token-file' "${dev_render}" >/dev/null; then
+  printf 'Worker startup unexpectedly retained a Consul secret dependency.\n' >&2
+  exit 1
+fi
 
 if grep -Eq '^[[:space:]]*set[[:space:]]+-x([[:space:]]|$)' \
-  "${template_path}" "${dev_render}" "${nondev_render}"; then
+  "${template_path}" "${dev_render}"; then
   printf 'Worker bootstrap must not persist rendered ACL material through shell tracing.\n' >&2
   exit 1
 fi
 
 grep -F 'readonly SWAP_SIZE_GB=32' "${dev_render}" >/dev/null
-grep -F 'readonly SWAP_SIZE_GB=48' "${nondev_render}" >/dev/null
 grep -F 'fallocate --length "${SWAP_SIZE_GB}G" "$SWAPFILE"' \
   "${dev_render}" >/dev/null
 grep -F 'active swapfile size ${active_swap_size_bytes} does not match configured size ${SWAP_SIZE_BYTES}' \
@@ -115,24 +122,12 @@ grep -F '[[ -L "$SWAPFILE" || ( -e "$SWAPFILE" && ! -f "$SWAPFILE" ) ]]' \
   "${dev_render}" >/dev/null
 grep -E 'SWAP_SIZE_GB[[:space:]]*=[[:space:]]*var\.boot_disk\.swap_size_gb' \
   "${nodepool_path}" >/dev/null
-grep -F 'set_orchestrator_version_metadata = var.environment != "dev"' \
-  "${cluster_path}" >/dev/null
-
-if grep -F '[Fetching orchestrator version from Nomad servers' \
-  "${dev_render}" >/dev/null; then
-  printf 'Dev worker startup must not wait for phase-two orchestrator metadata.\n' >&2
+if grep -F -e '[Fetching orchestrator version from Nomad servers' \
+  -e '--orchestrator-job-version' "${dev_render}" >/dev/null; then
+  printf 'Dev-only worker startup retained the removed management-token pinning path.\n' >&2
   exit 1
 fi
-
-if grep -F -- '--orchestrator-job-version' "${dev_render}" >/dev/null; then
-  printf 'Dev worker startup must not set orchestrator job-version metadata.\n' >&2
-  exit 1
-fi
-
-grep -F '[Fetching orchestrator version from Nomad servers' \
-  "${nondev_render}" >/dev/null
-grep -F -- '--orchestrator-job-version "$ORCHESTRATOR_VERSION"' \
-  "${nondev_render}" >/dev/null
+test "$(grep -c '/opt/nomad/bin/run-nomad.sh --client' "${dev_render}")" -eq 1
 
 if grep -F 'fallocate -l 100G' "${dev_render}" >/dev/null; then
   printf 'Worker startup still contains the legacy hard-coded 100 GB swap allocation.\n' >&2

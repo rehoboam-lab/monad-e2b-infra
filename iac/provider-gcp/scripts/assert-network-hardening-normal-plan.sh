@@ -24,9 +24,19 @@ stage_ledger='[
     "marker":"module.cluster.terraform_data.network_hardening_rollout_stage_network"
   },
   {
+    "stage":"server-safety",
+    "completion":"module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]",
+    "marker":"module.cluster.terraform_data.network_hardening_rollout_stage_server_safety[0]"
+  },
+  {
     "stage":"server",
-    "completion":"module.cluster.terraform_data.network_hardening_rollout_completion_server[0]",
-    "marker":"module.cluster.terraform_data.network_hardening_rollout_stage_server[0]"
+    "completion":"module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]",
+    "marker":"module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]"
+  },
+  {
+    "stage":"server-health",
+    "completion":"module.cluster.terraform_data.network_hardening_rollout_completion_server_health[0]",
+    "marker":"module.cluster.terraform_data.network_hardening_rollout_stage_server_health[0]"
   },
   {
     "stage":"api",
@@ -60,7 +70,7 @@ ledger_addresses="$(jq -cS '
 
 marker_stage=''
 if [[ "${expected_environment}" == "dev" ]]; then
-  for candidate_stage in network server api worker build; do
+  for candidate_stage in network server-safety server server-health api worker build; do
     expected_addresses="$(jq -cnS \
       --argjson ledger "${stage_ledger}" \
       --arg candidate "${candidate_stage}" '
@@ -142,7 +152,16 @@ fi
 # intent on every managed fleet template while allowing unrelated reviewed
 # template replacements (for example, an image revision) to proceed.
 template_expectations="$(jq -cn --arg stage "${marker_stage}" '
-  {disabled: 0, network: 1, server: 2, api: 3, worker: 4, build: 5} as $rank
+  {
+    disabled: 0,
+    network: 1,
+    "server-safety": 1,
+    server: 2,
+    "server-health": 2,
+    api: 3,
+    worker: 4,
+    build: 5
+  } as $rank
   | ($rank[$stage]) as $current
   | [
       {address:"module.cluster.google_compute_instance_template.server", enabled:($current >= 2)},

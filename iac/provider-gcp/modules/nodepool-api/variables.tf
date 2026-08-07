@@ -16,6 +16,11 @@ variable "cluster_tag_name" {
   type        = string
 }
 
+variable "nomad_server_tag_name" {
+  description = "Server-only GCE network tag used for Nomad retry_join."
+  type        = string
+}
+
 variable "cluster_name" {
   description = "Name of the cluster (used as base_instance_name and resource name prefix)."
   type        = string
@@ -108,19 +113,16 @@ variable "nomad_port" {
   type = number
 }
 
-variable "consul_acl_token_secret" {
-  type      = string
-  sensitive = true
+variable "consul_acl_token_secret_name" {
+  type = string
 }
 
-variable "consul_gossip_encryption_key_secret_data" {
-  type      = string
-  sensitive = true
+variable "consul_gossip_encryption_key_secret_name" {
+  type = string
 }
 
-variable "consul_dns_request_token_secret_data" {
-  type      = string
-  sensitive = true
+variable "consul_dns_request_token_secret_name" {
+  type = string
 }
 
 variable "node_pool" {

@@ -70,13 +70,18 @@ SSH-key value.
   environment-aware: it permits non-dev plans to initialize or preserve only the ledger root at
   `disabled`, while still rejecting any non-dev stage advancement or regression.
 - The cumulative rollout ledger permits exactly
-  `disabled -> network -> server -> api -> worker -> build`. Every completed stage has its own
-  completion/marker pair. A current-stage convergence sentinel depends on the exact current pool
-  and the previous marker, then waits for the administrative firewalls and affected MIGs
-  to report both `status.isStable` and `status.versionTarget.isReached`, inventories their exact
-  instance IDs and target templates, proves IAP/OS Login against each ID, and binds the replacement
-  names to healthy Nomad quorum/client state before that marker advances. Server/API stages also
-  require healthy load-balancer membership for that same inventory.
+  `disabled -> network -> server-safety -> server -> server-health -> api -> worker -> build`.
+  `server-safety` installs the one-surge, zero-unavailable update policy and the strict per-voter
+  health check while retaining the old check on the MIG. `server` replaces the template only after
+  the pre-server runtime-job evidence and staged Consul management handoff are valid.
+  `server-health` attaches the strict check only after every replacement proves its local-voter
+  endpoint. Every completed stage has its own completion/marker pair. A current-stage convergence
+  sentinel depends on the exact current boundary and the previous marker, then waits for the
+  administrative firewalls and affected MIGs to report both `status.isStable` and
+  `status.versionTarget.isReached`, inventories exact instance IDs and target templates, proves
+  IAP/OS Login against each ID, and binds the replacement names to healthy Nomad quorum/client
+  state before that marker advances. Server/API stages also require healthy load-balancer
+  membership for that same inventory.
   The saved plan contains the cumulative prior/current chain but excludes future pools. Its
   assertion permits only the current stage's exact firewall or pool boundary (including a subset
   left by a partial apply), requires all prior resources and markers to remain no-ops, rejects all
@@ -95,6 +100,10 @@ SSH-key value.
   before Terraform mutation.
 - Guest private/control-plane denies run on the tap before host NAT and before tenant allow rules.
   The host's own metadata ADC path does not traverse that tap rule.
+- The ACL transition is an explicit companion ledger: pre-server Nomad jobs are converged after
+  `network`; the candidate Consul management identity is staged after `server-safety`; the
+  post-handoff secret plan gates `server` and later; post-API jobs are converged after `api`; and
+  legacy management retirement requires both that evidence and the exact `build` checkpoint.
 - `make -C iac/provider-gcp network-security-check` guards all of these source relationships and
   runs the root-free GCP control-plane CIDR test.
 
@@ -106,7 +115,7 @@ The local branch passed the following checks before handoff:
   configuration.
 - The complete workload plan-assertion fixture suite, including quota, mutation-lease, release,
   cluster-readiness, template-manager, and worker-startup guards.
-- `network-security-check`, including real Terraform target-closure plans for all five stages that
+- `network-security-check`, including real Terraform target-closure plans for all seven stages that
   prove the cumulative prior/current graph, future-pool exclusion, precise child-output edges, the
   initial counted-sentinel replacement behavior, and the closed in-graph OS Login guard.
 - Serial rollout fixtures for every allowed transition, exact mutation boundaries, fresh
@@ -130,21 +139,35 @@ Do not apply this branch merely because validation is green.
    OS-Login-enabled candidate template. Do not use a production worker as the first proof.
 3. Set `OS_LOGIN_OPERATOR_ACCESS_CONFIRMED=true` in the ignored selected environment only after
    that evidence exists. The default false value is intentional.
-4. Execute only the ordered stages `network`, `server`, `api`, `worker`, `build`. Before each one,
+4. Execute only the ordered stages `network`, `server-safety`, `server`, `server-health`, `api`,
+   `worker`, `build`. Before each one,
    create a fresh mode-0600 checkpoint matching the schema enforced by
    `scripts/assert-network-hardening-checkpoint.sh`. Record concrete evidence identifiers or
-   command-result locations, not bare assertions.
+   command-result locations, not bare assertions. Between those Terraform stages, execute the ACL
+   handoff gates in this exact order: `pre-server` runtime jobs after `network`; candidate
+   management staging and its reviewed post-handoff plan after `server-safety`; `post-api` runtime
+   jobs after `api`; and legacy management retirement only after `build`.
 
    All checkpoints contain `schema_version`, `stage`, `gcp_project_id`, `gcp_region`, `gcp_zone`,
    `prefix`, `source_git_head`, `operator_principal`, `observed_unix`, `expires_unix`, and exact
    `checks`/`evidence` maps. Every check is `true`; every same-named evidence value is a non-empty
    command result, log query, or inventory URI. `network` requires `control_plane_healthy`,
-   `iap_tunnel_access`, and `os_login_admin_access`. `server` and `api` require the two access
-   checks plus `nomad_quorum_healthy`, `api_load_balancer_healthy`, and `target_pool_healthy`.
-   `worker` requires the access checks plus `target_pool_drained`, `zero_target_allocations`,
+   `iap_tunnel_access`, and `os_login_admin_access`. `server-safety` requires the access and quorum
+   proofs plus `old_health_check_attached`, `strict_health_check_unattached`, and
+   `surge_policy_safe`. `server` and `api` require access, quorum, load-balancer, and target-pool
+   health. `server-health` additionally requires `strict_health_check_attached`. `worker` requires
+   the access checks plus `target_pool_drained`, `zero_target_allocations`,
    `zero_target_workcells`, and `durable_sessions_preserved`. `build` replaces the final item with
    `build_queue_quiesced`.
-5. Follow the existing drain procedure before the worker/build stages: halt placement,
+5. Treat the ACL steps as mutation gates, not optional validation. The `pre-server` runtime-job
+   apply is bound to the exact network checkpoint and must publish its private evidence before a
+   server-stage plan is admitted. Candidate management staging requires that evidence and the exact
+   `server-safety` checkpoint; it records the legacy/candidate accessor lineage while the legacy
+   accessor remains usable. Generate and review `consul-management-handoff-post-plan` before
+   `server`. After `api`, apply the `post-api` runtime-job projection. Only an exact `build`
+   checkpoint plus the post-API evidence admits the confirmation-bound retirement command, which
+   revokes the legacy accessor and disables the legacy and unregistered Secret Manager versions.
+6. Follow the existing drain procedure before the worker/build stages: halt placement,
    pause or snapshot workcells, prove durable upload, drain Nomad, and verify zero allocations.
    The server pool must retain its reviewed one-surge, explicit-`SUBSTITUTE`, zero-unavailable,
    120-second-ready policy. Port 50001 `/healthz` must identify that exact GCE instance as an alive,
@@ -160,18 +183,18 @@ Do not apply this branch merely because validation is green.
    `130.211.0.0/22` and `35.191.0.0/16` to the `orch` target tag; a Terraform precondition and
    static regression test bind the voter endpoint to that narrow rule. The live
    `e2b-load-balancer-hc` rule was rechecked with that exact shape before this change was published.
-6. Create, inspect, and apply one stage at a time (example for `server`):
+7. Create, inspect, and apply one stage at a time (example for `server-safety`):
 
    ```bash
    mise exec -- make -C iac/provider-gcp workload-cluster-plan \
-     WORKLOAD_CLUSTER_STAGE=server \
-     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-checkpoint.json
+     WORKLOAD_CLUSTER_STAGE=server-safety \
+     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-safety-checkpoint.json
    mise exec -- terraform -chdir=iac/provider-gcp \
-     show .tfplan.workload-cluster.server.dev
+     show .tfplan.workload-cluster.server-safety.dev
    mise exec -- make -C iac/provider-gcp workload-cluster-apply \
-     WORKLOAD_CLUSTER_STAGE=server \
-     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-checkpoint.json \
-     CONFIRM='APPLY NETWORK HARDENING server'
+     WORKLOAD_CLUSTER_STAGE=server-safety \
+     WORKLOAD_CLUSTER_CHECKPOINT=/private/path/server-safety-checkpoint.json \
+     CONFIRM='APPLY NETWORK HARDENING server-safety'
    ```
 
    The reviewed plan must contain only the exact current-stage mutation plus the in-module guard
@@ -273,11 +296,11 @@ Do not apply this branch merely because validation is green.
    another environment cannot recover or release this state. Stale, replaced, or wrong-scope token
    copies fail before mutation. Reverse-stage plans remain fail-closed; do not bypass the workflow
    for an ad hoc rollback.
-7. The sentinel enforces replacement-identity-bound IAP/OS Login and role-specific service health.
+8. The sentinel enforces replacement-identity-bound IAP/OS Login and role-specific service health.
    Before proceeding, separately retain the broader canary evidence for attached-service-account ADC,
    host metadata reachability, guest metadata/private-control-plane denial, public egress through
    Cloud NAT, and zero leaked workcells.
-8. Persist the successfully applied stage as `NETWORK_HARDENING_ROLLOUT_STAGE` in the ignored
+9. Persist the successfully applied stage as `NETWORK_HARDENING_ROLLOUT_STAGE` in the ignored
    selected environment. Only after every fleet node is on the `build` stage should the legacy project
    `ssh-keys` metadata be removed in a separate reviewed operation with a rollback principal
    already proven.

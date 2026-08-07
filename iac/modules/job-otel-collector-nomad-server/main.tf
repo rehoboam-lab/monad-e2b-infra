@@ -7,6 +7,9 @@ locals {
       grafana_username             = var.grafana_username
       enable_gcp_telemetry_metrics = var.enable_gcp_telemetry_metrics
       gcp_telemetry_project_id     = var.gcp_telemetry_project_id
+      gcp_project_id               = var.gcp_project_id
+      gcp_zone                     = var.gcp_zone
+      nomad_server_discovery_filter = var.nomad_server_discovery_filter
     },
   )
 
@@ -71,4 +74,19 @@ variable "gcp_telemetry_project_id" {
   type        = string
   default     = ""
   description = "Google Cloud project ID used for native Cloud Monitoring metric export. Required when enable_gcp_telemetry_metrics is true."
+}
+
+variable "gcp_project_id" {
+  type    = string
+  default = ""
+}
+
+variable "gcp_zone" {
+  type    = string
+  default = ""
+}
+
+variable "nomad_server_discovery_filter" {
+  type    = string
+  default = ""
 }

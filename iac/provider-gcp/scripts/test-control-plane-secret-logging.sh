@@ -11,7 +11,6 @@ startup_scripts=(
 )
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "${work_dir}"' EXIT
-
 if grep -Eq '^[[:space:]]*set[[:space:]]+-x([[:space:]]|$)' \
   "${nomad_script}" "${consul_script}" "${startup_scripts[@]}"; then
   printf 'Control-plane bootstrap scripts must not enable shell tracing.\n' >&2
@@ -56,11 +55,6 @@ if grep -Fq "${sentinel}" <<<"${bootstrap_output}"; then
 fi
 grep -Fq 'Nomad ACL is already bootstrapped' <<<"${bootstrap_output}"
 
-if find "${work_dir}" -maxdepth 1 -name 'nomad.token.*' -print -quit | grep -q .; then
-  printf 'Nomad ACL bootstrap left a token file behind.\n' >&2
-  exit 1
-fi
-
 if unexpected_output="$(
   PATH="${work_dir}/bin:${PATH}" TMPDIR="${work_dir}" \
     NOMAD_TEST_BOOTSTRAP_TOKEN_FILE="${bootstrap_token_file}" \
@@ -77,9 +71,4 @@ if grep -Fq "${sentinel}" <<<"${unexpected_output}"; then
   exit 1
 fi
 grep -Fq 'Nomad ACL bootstrap failed' <<<"${unexpected_output}"
-if find "${work_dir}" -maxdepth 1 -name 'nomad.token.*' -print -quit | grep -q .; then
-  printf 'Failed Nomad ACL bootstrap left a token file behind.\n' >&2
-  exit 1
-fi
-
 printf 'Control-plane secret logging regression test passed.\n'

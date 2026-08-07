@@ -136,9 +136,26 @@ expected_resources="$(
     {address:"module.init.google_project_iam_member.api_controller[\"roles/logging.logWriter\"]",type:"google_project_iam_member"},
     {address:"module.init.google_project_iam_member.api_controller[\"roles/monitoring.editor\"]",type:"google_project_iam_member"},
     {address:"module.init.google_service_account.api_controller_service_account",type:"google_service_account"},
+    {address:"module.init.google_service_account.data_node_service_account",type:"google_service_account"},
+    {address:"module.init.google_service_account.nomad_server_service_account",type:"google_service_account"},
+    {address:"module.init.google_artifact_registry_repository_iam_member.data_node_core_reader",type:"google_artifact_registry_repository_iam_member"},
+    {address:"module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member",type:"google_artifact_registry_repository_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.loki_storage_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/compute.networkViewer\"]",type:"google_project_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/logging.logWriter\"]",type:"google_project_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"data:roles/monitoring.editor\"]",type:"google_project_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"server:roles/compute.networkViewer\"]",type:"google_project_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"server:roles/logging.logWriter\"]",type:"google_project_iam_member"},
+    {address:"module.init.google_project_iam_member.non_api_runtime[\"server:roles/monitoring.editor\"]",type:"google_project_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.api_controller[\"controller_artifact\"]",type:"google_storage_bucket_iam_member"},
     {address:"module.init.google_storage_bucket_iam_member.api_controller[\"instance_setup\"]",type:"google_storage_bucket_iam_member"},
-    {address:"module.init.google_storage_bucket_iam_member.api_controller[\"loki\"]",type:"google_storage_bucket_iam_member"}
+    {address:"module.init.google_storage_bucket_iam_member.api_controller[\"loki\"]",type:"google_storage_bucket_iam_member"},
+    {address:"module.init.terraform_data.acl_bootstrap_environment_guard",type:"terraform_data"}
   ] | sort_by(.address)'
 )"
 
@@ -207,12 +224,34 @@ if ! jq -ne \
   exit 1
 fi
 
+if ! jq -e '
+  [
+    .resource_changes[]?
+    | select(.address == "module.init.terraform_data.acl_bootstrap_environment_guard")
+  ] as $guard
+  | ($guard | length) == 1
+    and $guard[0].mode == "managed"
+    and $guard[0].type == "terraform_data"
+    and $guard[0].change.after.input == "dev"
+    and (
+      $guard[0].change.actions == ["create"]
+      or (
+        $guard[0].change.actions == ["no-op"]
+        and $guard[0].change.before.input == "dev"
+      )
+    )
+' <<<"${plan_json}" >/dev/null; then
+  printf 'Refusing workload prerequisite plan: the module.init dev-only ACL migration guard is missing or closed.\n' >&2
+  exit 1
+fi
+
 if ! jq -e \
   --arg expected_project "${expected_project}" \
   --arg expected_region "${expected_region}" \
   --arg expected_prefix "${expected_prefix}" '
-  def row($address):
-    [.resource_changes[]? | select(.address == $address)][0];
+  . as $plan
+  | def row($address):
+    [$plan.resource_changes[]? | select(.address == $address)][0];
   def config($address):
     [.configuration.root_module.resources[]? | select(.address == $address)][0];
   def creating:
@@ -335,6 +374,109 @@ if ! jq -e \
   ]
 ' <<<"${plan_json}" >/dev/null; then
   printf 'Refusing workload prerequisite plan: API/controller identity must match the exact least-privilege live rollout contract.\n' >&2
+  exit 1
+fi
+
+if ! jq -e \
+  --arg project "${expected_project}" \
+  --arg region "${expected_region}" \
+  --arg prefix "${expected_prefix}" '
+  . as $plan
+  | def row($address):
+    [$plan.resource_changes[]? | select(.address == $address)][0];
+  def create_or_stable:
+    .change.actions == ["create"]
+    or (
+      .change.actions == ["no-op"]
+      and .change.before == .change.after
+    );
+  def exact_or_deferred($value; $unknown; $expected):
+    ($value == $expected and $unknown != true)
+    or ($value == null and $unknown == true);
+  def exact_member($row; $member):
+    exact_or_deferred(
+      $row.change.after.member;
+      $row.change.after_unknown.member;
+      $member
+    );
+  def repo_name:
+    if type == "string" and startswith("projects/") then split("/")[-1] else . end;
+
+  ("serviceAccount:" + $prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com") as $server
+  | ("serviceAccount:" + $prefix + "data-node@" + $project + ".iam.gserviceaccount.com") as $data
+  | ("serviceAccount:" + $prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com") as $worker
+  | row("module.init.google_service_account.nomad_server_service_account") as $server_sa
+  | row("module.init.google_service_account.data_node_service_account") as $data_sa
+  | row("module.init.google_artifact_registry_repository_iam_member.data_node_orchestration_repository_member") as $data_orchestration
+  | row("module.init.google_artifact_registry_repository_iam_member.data_node_core_reader") as $data_core
+  | row("module.init.google_storage_bucket_iam_member.instance_setup_bucket_nomad_server_iam") as $server_setup
+  | row("module.init.google_storage_bucket_iam_member.instance_setup_bucket_data_node_iam") as $data_setup
+  | row("module.init.google_storage_bucket_iam_member.loki_storage_iam") as $loki_legacy
+  | row("module.init.google_storage_bucket_iam_member.loki_storage_data_node_iam") as $loki_data
+  | row("module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_iam") as $clickhouse_legacy
+  | row("module.init.google_storage_bucket_iam_member.clickhouse_backups_bucket_data_node_iam") as $clickhouse_data
+  | [
+      {kind:"server", role:"roles/compute.networkViewer"},
+      {kind:"server", role:"roles/logging.logWriter"},
+      {kind:"server", role:"roles/monitoring.editor"},
+      {kind:"data", role:"roles/compute.networkViewer"},
+      {kind:"data", role:"roles/logging.logWriter"},
+      {kind:"data", role:"roles/monitoring.editor"}
+    ] as $project_roles
+  | all([$server_sa, $data_sa, $data_orchestration, $data_core, $server_setup, $data_setup][];
+      create_or_stable
+      and .provider_name == "registry.terraform.io/hashicorp/google"
+    )
+  and $server_sa.change.after.account_id == ($prefix + "nomad-server")
+  and $server_sa.change.after.project == $project
+  and exact_or_deferred(
+    $server_sa.change.after.email;
+    $server_sa.change.after_unknown.email;
+    ($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com")
+  )
+  and $data_sa.change.after.account_id == ($prefix + "data-node")
+  and $data_sa.change.after.project == $project
+  and exact_or_deferred(
+    $data_sa.change.after.email;
+    $data_sa.change.after_unknown.email;
+    ($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")
+  )
+  and ($data_orchestration.change.after.repository | repo_name) == "e2b-orchestration"
+  and $data_orchestration.change.after.role == "roles/artifactregistry.reader"
+  and exact_member($data_orchestration; $data)
+  and ($data_core.change.after.repository | repo_name) == ($prefix + "core")
+  and $data_core.change.after.role == "roles/artifactregistry.reader"
+  and exact_member($data_core; $data)
+  and $server_setup.change.after.bucket == ($project + "-instance-setup")
+  and $server_setup.change.after.role == "roles/storage.objectViewer"
+  and exact_member($server_setup; $server)
+  and $data_setup.change.after.bucket == ($project + "-instance-setup")
+  and $data_setup.change.after.role == "roles/storage.objectViewer"
+  and exact_member($data_setup; $data)
+  and all([$loki_legacy, $loki_data][];
+    create_or_stable
+    and .change.after.bucket == ($project + "-loki-storage")
+    and .change.after.role == "roles/storage.objectUser"
+  )
+  and exact_member($loki_legacy; $worker)
+  and exact_member($loki_data; $data)
+  and all([$clickhouse_legacy, $clickhouse_data][];
+    create_or_stable
+    and .change.after.bucket == ($project + "-clickhouse-backups")
+    and .change.after.role == "roles/storage.objectUser"
+  )
+  and exact_member($clickhouse_legacy; $worker)
+  and exact_member($clickhouse_data; $data)
+  and all($project_roles[];
+    . as $want
+    | row("module.init.google_project_iam_member.non_api_runtime[\"" + $want.kind + ":" + $want.role + "\"]") as $grant
+    | ($grant | create_or_stable)
+      and $grant.change.after.project == $project
+      and $grant.change.after.role == $want.role
+      and exact_member($grant; if $want.kind == "server" then $server else $data end)
+  )
+' <<<"${plan_json}" >/dev/null; then
+  printf 'Refusing workload prerequisite plan: role-specific attached identities or their exact least-privilege grants drifted.\n' >&2
   exit 1
 fi
 
@@ -537,7 +679,7 @@ if ! jq -e \
         "google_artifact_registry_repository.custom_environments_repository"
       ]
     and $repo_iam_config.expressions.member.references
-      == ["module.init.service_account_email", "module.init"]
+      == ["module.init.worker_build_service_account_email", "module.init"]
     and $read_secret.change.after.project == $expected_project
     and $read_secret.change.after_unknown.project != true
     and $read_secret.change.after.secret_id

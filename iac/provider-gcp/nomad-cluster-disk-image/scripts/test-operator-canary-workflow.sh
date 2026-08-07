@@ -386,7 +386,7 @@ if "${script_dir}/assert-packer-config.sh" \
   printf 'Tampered root artifact identity unexpectedly passed.\n' >&2
   exit 1
 fi
-if rg -n \
+if grep -REn \
   'get\.docker\.com|add-google-cloud-ops-agent-repo|git clone|CHECKSUM_URL' \
   "${config_root}/main.pkr.hcl" \
   "${repo_root}/iac/nomad-cluster-disk-image/setup" >/dev/null; then

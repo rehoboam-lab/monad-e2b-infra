@@ -5,6 +5,11 @@ variable "prefix" {
 variable "environment" {
   description = "The environment (e.g. staging, prod)."
   type        = string
+
+  validation {
+    condition     = var.environment == "dev"
+    error_message = "The role-split ACL/Secret Manager bootstrap is dev-only; nondev requires a separately reviewed identity and image rollout."
+  }
 }
 
 variable "cluster_tag_name" {
@@ -156,12 +161,14 @@ variable "network_hardening_rollout_stage" {
     condition = contains([
       "disabled",
       "network",
+      "server-safety",
       "server",
+      "server-health",
       "api",
       "worker",
       "build",
     ], var.network_hardening_rollout_stage)
-    error_message = "network_hardening_rollout_stage must be disabled, network, server, api, worker, or build."
+    error_message = "network_hardening_rollout_stage must be disabled, network, server-safety, server, server-health, api, worker, or build."
   }
 }
 
@@ -235,8 +242,19 @@ variable "network_name" {
   type = string
 }
 
-variable "google_service_account_email" {
-  type = string
+variable "nomad_server_service_account_email" {
+  description = "Attached identity for the Nomad/Consul control-server pool."
+  type        = string
+}
+
+variable "worker_build_service_account_email" {
+  description = "Attached identity for Nomad worker and build pools."
+  type        = string
+}
+
+variable "data_node_service_account_email" {
+  description = "Attached identity for Loki and ClickHouse data pools."
+  type        = string
 }
 
 variable "api_controller_service_account_email" {
@@ -282,13 +300,26 @@ variable "fc_busybox_bucket_name" {
   description = "The name of the bucket to store the busybox binary"
 }
 
-variable "consul_acl_token_secret" {
-  type = string
+variable "consul_acl_token_candidate_secret_version_name" {
+  description = "Immutable candidate Consul management-token version registered before the old token is revoked."
+  type        = string
 }
 
-variable "nomad_acl_token_secret" {
-  type = string
+variable "consul_acl_token_candidate_secret_name" {
+  description = "Distinct candidate Consul management-token Secret Manager resource."
+  type        = string
 }
+
+variable "nomad_acl_token_secret_name" {
+  description = "Secret Manager resource name for the Nomad ACL token fetched by GCE bootstrap through ADC."
+  type        = string
+}
+
+variable "nomad_acl_token_secret_version_name" {
+  description = "Immutable promoted Secret Manager version for the Nomad ACL token fetched by GCE bootstrap."
+  type        = string
+}
+
 
 variable "nomad_port" {
   type = number

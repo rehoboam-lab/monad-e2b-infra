@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export GCP_PROJECT_ID="monad-code"
+export PREFIX="e2b-"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 provider_root="$(cd "${script_dir}/.." && pwd)"
 repo_root="$(cd "${provider_root}/../.." && pwd)"
@@ -41,15 +44,26 @@ grep -F 'from = terraform_data.network_hardening_rollout_completion' \
   "${cluster_source}" >/dev/null
 grep -F 'from = terraform_data.network_hardening_rollout_stage' \
   "${cluster_source}" >/dev/null
-for stage in network server api worker build; do
-  grep -F "resource \"terraform_data\" \"network_hardening_rollout_completion_${stage}\"" \
+grep -A18 -F 'resource "google_storage_bucket_object" "setup_config_objects"' \
+  "${cluster_source}" | grep -F 'create_before_destroy = true' >/dev/null
+for resource_suffix in network server_safety server_template server_health api worker build; do
+  grep -F "resource \"terraform_data\" \"network_hardening_rollout_completion_${resource_suffix}\"" \
     "${cluster_source}" >/dev/null
-  grep -F "resource \"terraform_data\" \"network_hardening_rollout_stage_${stage}\"" \
+  grep -F "resource \"terraform_data\" \"network_hardening_rollout_stage_${resource_suffix}\"" \
     "${cluster_source}" >/dev/null
 done
+
+expect_fail "saved plan IAM is bound to the externally selected project" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server.plan" "${fake_terraform}" server '' other-project e2b-
+expect_fail "saved plan IAM is bound to the externally selected prefix" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server.plan" "${fake_terraform}" server '' monad-code other-
 for dependency in \
   terraform_data.network_hardening_rollout_stage_network \
-  terraform_data.network_hardening_rollout_stage_server \
+  terraform_data.network_hardening_rollout_stage_server_safety \
+  terraform_data.network_hardening_rollout_stage_server_template \
+  terraform_data.network_hardening_rollout_stage_server_health \
   terraform_data.network_hardening_rollout_stage_api \
   terraform_data.network_hardening_rollout_stage_worker \
   google_compute_region_instance_group_manager.server_pool \
@@ -97,19 +111,73 @@ grep -F 'preserving the shared lease and private recovery directory' \
 make_plan() {
   local stage="$1"
   local output="$2"
-  jq -n --arg stage "${stage}" '
-    {network:1,server:2,api:3,worker:4,build:5} as $rank
-    | ["network","server","api","worker","build"] as $stages
+  jq -n \
+    --arg stage "${stage}" \
+    --arg project "${GCP_PROJECT_ID}" \
+    --arg prefix "${PREFIX}" '
+    def iam_change($resource; $key; $secret; $member; $actions):
+      {
+        address:("module.cluster.google_secret_manager_secret_iam_member." + $resource + "[" + ($key | @json) + "]"),
+        mode:"managed",
+        type:"google_secret_manager_secret_iam_member",
+        change:{
+          actions:$actions,
+          before:(
+            if $actions == ["create"] then null else {
+              project:$project,
+              secret_id:$secret,
+              role:"roles/secretmanager.secretAccessor",
+              member:$member
+            } end
+          ),
+          after:{
+            project:$project,
+            secret_id:$secret,
+            role:"roles/secretmanager.secretAccessor",
+            member:$member
+          }
+        }
+      };
+    def health_check($address; $name; $port; $path; $actions; $before):
+      {
+        address:$address,
+        mode:"managed",
+        type:"google_compute_health_check",
+        change:{
+          actions:$actions,
+          before:$before,
+          after:(
+            if $actions == ["delete"] then null else {
+              id:("projects/" + $project + "/global/healthChecks/" + $name),
+              name:$name,
+              check_interval_sec:5,
+              timeout_sec:5,
+              healthy_threshold:2,
+              unhealthy_threshold:10,
+              http_health_check:[{port:$port,request_path:$path}]
+            } end
+          ),
+          after_unknown:{}
+        }
+      };
+    {network:1,"server-safety":2,server:3,"server-health":4,api:5,worker:6,build:7} as $rank
+    | ["network","server-safety","server","server-health","api","worker","build"] as $stages
+    | ("1" * 64) as $previous_setup_hash
+    | ("2" * 64) as $current_setup_hash
     | {
         network:"module.cluster.terraform_data.network_hardening_rollout_completion_network",
-        server:"module.cluster.terraform_data.network_hardening_rollout_completion_server[0]",
+        "server-safety":"module.cluster.terraform_data.network_hardening_rollout_completion_server_safety[0]",
+        server:"module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]",
+        "server-health":"module.cluster.terraform_data.network_hardening_rollout_completion_server_health[0]",
         api:"module.cluster.terraform_data.network_hardening_rollout_completion_api[0]",
         worker:"module.cluster.terraform_data.network_hardening_rollout_completion_worker[0]",
         build:"module.cluster.terraform_data.network_hardening_rollout_completion_build[0]"
       } as $completions
     | {
         network:"module.cluster.terraform_data.network_hardening_rollout_stage_network",
-        server:"module.cluster.terraform_data.network_hardening_rollout_stage_server[0]",
+        "server-safety":"module.cluster.terraform_data.network_hardening_rollout_stage_server_safety[0]",
+        server:"module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]",
+        "server-health":"module.cluster.terraform_data.network_hardening_rollout_stage_server_health[0]",
         api:"module.cluster.terraform_data.network_hardening_rollout_stage_api[0]",
         worker:"module.cluster.terraform_data.network_hardening_rollout_stage_worker[0]",
         build:"module.cluster.terraform_data.network_hardening_rollout_stage_build[0]"
@@ -120,11 +188,9 @@ make_plan() {
           "module.cluster.module.network.google_compute_firewall.internal_remote_connection_firewall_ingress",
           "module.cluster.module.network.google_compute_firewall.remote_connection_firewall_ingress"
         ],
-        server: [
-          "module.cluster.google_compute_health_check.server_nomad_check",
-          "module.cluster.google_compute_instance_template.server",
-          "module.cluster.google_compute_region_instance_group_manager.server_pool"
-        ],
+        "server-safety": [],
+        server: [],
+        "server-health": [],
         api: [
           "module.cluster.google_compute_instance_group_manager.api_pool",
           "module.cluster.google_compute_instance_template.api"
@@ -143,18 +209,60 @@ make_plan() {
         ]
       } as $mutations
     | [
-        {address:"module.cluster.google_compute_instance_template.server", role_rank:2},
-        {address:"module.cluster.google_compute_instance_template.api", role_rank:3},
-        {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template", role_rank:4},
-        {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template", role_rank:5},
-        {address:"module.cluster.google_compute_instance_template.loki", role_rank:5},
-        {address:"module.cluster.google_compute_instance_template.clickhouse", role_rank:5}
+        {address:"module.cluster.google_compute_instance_template.server", role_rank:3, identity:($prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com"), server:true},
+        {address:"module.cluster.google_compute_instance_template.api", role_rank:5, identity:($prefix + "api-controller@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.module.client_cluster[\"default\"].google_compute_instance_template.template", role_rank:6, identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.module.build_cluster[\"default\"].google_compute_instance_template.template", role_rank:7, identity:($prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.google_compute_instance_template.loki", role_rank:7, identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")},
+        {address:"module.cluster.google_compute_instance_template.clickhouse", role_rank:7, identity:($prefix + "data-node@" + $project + ".iam.gserviceaccount.com")}
       ] as $templates
+    | ("projects/" + $project + "/secrets/" + $prefix) as $secret_base
+    | ("serviceAccount:" + $prefix + "nomad-server@" + $project + ".iam.gserviceaccount.com") as $server_member
+    | ("serviceAccount:" + $prefix + "infra-instances@" + $project + ".iam.gserviceaccount.com") as $worker_member
+    | ("serviceAccount:" + $prefix + "data-node@" + $project + ".iam.gserviceaccount.com") as $data_member
+    | ("serviceAccount:" + $prefix + "api-controller@" + $project + ".iam.gserviceaccount.com") as $api_member
+    | [
+        {key:"consul_management_candidate",secret:"consul-management-candidate-token"},
+        {key:"nomad_management",secret:"nomad-secret-id"},
+        {key:"consul_gossip",secret:"consul-gossip-key"},
+        {key:"consul_catalog_read",secret:"consul-catalog-read-token"},
+        {key:"consul_nomad_client_sync",secret:"consul-nomad-client-sync-token"},
+        {key:"consul_worker_autoscaler",secret:"consul-worker-autoscaler-token"}
+      ] as $server_secrets
+    | [] as $worker_secrets
+    | [
+        {key:"consul_gossip",secret:"consul-gossip-key"},
+        {key:"consul_catalog_read",secret:"consul-catalog-read-token"},
+        {key:"consul_nomad_client_sync",secret:"consul-nomad-client-sync-token"}
+      ] as $data_secrets
+    | $data_secrets as $api_secrets
+    | ($prefix + "orch-server-nomad-check") as $legacy_health_name
+    | ($prefix + "orch-server-voter-check") as $strict_health_name
+    | {
+        id:("projects/" + $project + "/global/healthChecks/" + $legacy_health_name),
+        name:$legacy_health_name,
+        check_interval_sec:5, timeout_sec:5,
+        healthy_threshold:2, unhealthy_threshold:10,
+        http_health_check:[{port:4646,request_path:"/v1/agent/health"}]
+      } as $legacy_health
+    | {
+        id:("projects/" + $project + "/global/healthChecks/" + $strict_health_name),
+        name:$strict_health_name,
+        check_interval_sec:5, timeout_sec:5,
+        healthy_threshold:2, unhealthy_threshold:10,
+        http_health_check:[{port:50001,request_path:"/healthz"}]
+      } as $strict_health
     | {
         format_version:"1.2",
         errored:false,
         resource_changes: (
           [
+            {
+              address:"module.cluster.terraform_data.acl_bootstrap_environment_guard",
+              mode:"managed",
+              type:"terraform_data",
+              change:{actions:["no-op"],before:{input:"dev"},after:{input:"dev"}}
+            },
             {
               address:"module.cluster.terraform_data.os_login_operator_access_guard",
               mode:"managed",
@@ -166,8 +274,15 @@ make_plan() {
               mode:"managed",
               type:"terraform_data",
               change:{
-                actions:(if $stage == "network" then ["delete","create"] else ["create"] end),
-                before:(if $stage == "network" then {input:"disabled"} else null end),
+                actions:(
+                  if $stage == "network" or $stage == "server-safety"
+                  then ["delete","create"] else ["create"] end
+                ),
+                before:(
+                  if $stage == "network" then {input:"disabled"}
+                  elif $stage == "server-safety" then {input:"server"}
+                  else null end
+                ),
                 after:{input:$stage}
               }
             },
@@ -176,8 +291,12 @@ make_plan() {
               mode:"managed",
               type:"terraform_data",
               change:{
-                actions:(if $stage == "network" then ["update"] else ["create"] end),
-                before:(if $stage == "network" then {input:"disabled"} else null end),
+                actions:(if $stage == "network" or $stage == "server-safety" then ["update"] else ["create"] end),
+                before:(
+                  if $stage == "network" then {input:"disabled"}
+                  elif $stage == "server-safety" then {input:"server"}
+                  else null end
+                ),
                 after:{input:$stage}
               }
             }
@@ -197,6 +316,18 @@ make_plan() {
                   change:{actions:["no-op"],before:{input:$prior},after:{input:$prior}}
                 }
             ]
+          + (
+              if $rank[$stage] >= $rank.server then [{
+                address:"module.cluster.terraform_data.consul_management_handoff_candidate[0]",
+                mode:"managed",
+                type:"terraform_data",
+                change:{
+                  actions:(if $stage == "server" then ["create"] else ["no-op"] end),
+                  before:(if $stage == "server" then null else {input:{phase:"candidate",server_stage:"server",candidate_ref:("projects/" + $project + "/secrets/" + $prefix + "consul-management-candidate-token/versions/1")}} end),
+                  after:{input:{phase:"candidate",server_stage:"server",candidate_ref:("projects/" + $project + "/secrets/" + $prefix + "consul-management-candidate-token/versions/1")}}
+                }
+              }] else [] end
+            )
           + [
               $templates[]
               | select(.role_rank <= $rank[$stage])
@@ -208,20 +339,175 @@ make_plan() {
                   change:{
                     actions:(if ($mutations[$stage] | index($template.address)) then ["create","delete"] else ["no-op"] end),
                     before:{metadata:{}},
-                    after:{metadata:{"enable-oslogin":"TRUE"}}
+                    after:{
+                      metadata:{"enable-oslogin":"TRUE"},
+                      service_account:[{email:$template.identity}],
+                      tags:(if ($template.server // false) then [($prefix + "nomad-server")] else [] end)
+                    }
                   }
                 }
             ]
           + (
               if $rank[$stage] >= $rank.server then [
+                "run-nomad", "run-consul", "fetch-gcp-secret"
+                | . as $object
+                | {
+                    address:("module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/" + $object + ".sh\"]"),
+                    mode:"managed",
+                    type:"google_storage_bucket_object",
+                    change:{
+                      actions:(if $stage == "server" then ["delete","create"] else ["no-op"] end),
+                      before:{
+                        bucket:"monad-code-instance-setup",
+                        deletion_policy:"ABANDON",
+                        name:($object + "-" + (if $stage == "server" then $previous_setup_hash else $current_setup_hash end) + ".sh"),
+                        source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
+                      },
+                      after:{
+                        bucket:"monad-code-instance-setup",
+                        deletion_policy:"ABANDON",
+                        name:($object + "-" + $current_setup_hash + ".sh"),
+                        source:("/repo/nomad-cluster/scripts/" + $object + ".sh")
+                      }
+                    }
+                  }
+              ] else [] end
+            )
+          + (
+              if $rank[$stage] < $rank.server then []
+              elif $stage == "server" then [
+                $server_secrets[]
+                | iam_change("bootstrap_server"; .key; $secret_base + .secret; $server_member; ["create"])
+              ]
+              elif $stage == "server-health" then [
+                $server_secrets[]
+                | iam_change("bootstrap_server"; .key; $secret_base + .secret; $server_member; ["no-op"])
+              ]
+              elif $stage == "api" then (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; .key; $secret_base + .secret; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; .key; $secret_base + .secret; $api_member; ["create"])
+                ]
+              )
+              elif $stage == "worker" then (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; .key; $secret_base + .secret; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; .key; $secret_base + .secret; $api_member; ["no-op"])
+                ] + [
+                  $worker_secrets[]
+                  | iam_change("bootstrap_worker"; .key; $secret_base + .secret; $worker_member; ["create"])
+                ]
+              )
+              else (
+                [
+                  $server_secrets[]
+                  | iam_change("bootstrap_server"; .key; $secret_base + .secret; $server_member; ["no-op"])
+                ] + [
+                  $api_secrets[]
+                  | iam_change("bootstrap_api"; .key; $secret_base + .secret; $api_member; ["no-op"])
+                ] + [
+                  $worker_secrets[]
+                  | iam_change("bootstrap_worker"; .key; $secret_base + .secret; $worker_member; ["no-op"])
+                ] + [
+                  $data_secrets[]
+                  | iam_change("bootstrap_data"; .key; $secret_base + .secret; $data_member; ["create"])
+                ]
+              ) end
+            )
+          + (
+              if $rank[$stage] >= $rank["server-safety"] then [
+                health_check(
+                  "module.cluster.google_compute_health_check.server_nomad_check_legacy[0]";
+                  $legacy_health_name; 4646; "/v1/agent/health";
+                  (if $stage == "api" then ["delete"] else ["no-op"] end);
+                  $legacy_health
+                ),
+                health_check(
+                  "module.cluster.google_compute_health_check.server_voter_check";
+                  $strict_health_name; 50001; "/healthz";
+                  (if $stage == "server-safety" then ["create"] else ["no-op"] end);
+                  (if $stage == "server-safety" then null else $strict_health end)
+                ),
                 {
-                  address:"module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]",
+                  address:"module.cluster.terraform_data.server_mig_safety_policy[0]",
                   mode:"managed",
-                  type:"google_storage_bucket_object",
+                  type:"terraform_data",
                   change:{
-                    actions:(if $stage == "server" then ["delete","create"] else ["no-op"] end),
-                    before:{name:"run-nomad-11111.sh",source:"/repo/nomad-cluster/scripts/run-nomad.sh"},
-                    after:{name:"run-nomad-22222.sh",source:"/repo/nomad-cluster/scripts/run-nomad.sh"}
+                    actions:(if $stage == "server-safety" then ["create"] else ["no-op"] end),
+                    before:(if $stage == "server-safety" then null else {input:{
+                      phase:"server-safety",
+                      gcp_project_id:$project,
+                      gcp_region:"us-east4",
+                      server_pool:($prefix + "orch-server-rig"),
+                      legacy_health_check:$legacy_health_name,
+                      strict_health_check:$strict_health_name,
+                      expected_cluster_size:3,
+                      script_sha256:("0" * 64)
+                    }} end),
+                    after:{input:{
+                      phase:"server-safety",
+                      gcp_project_id:$project,
+                      gcp_region:"us-east4",
+                      server_pool:($prefix + "orch-server-rig"),
+                      legacy_health_check:$legacy_health_name,
+                      strict_health_check:$strict_health_name,
+                      expected_cluster_size:3,
+                      script_sha256:("0" * 64)
+                    }}
+                  }
+                }
+              ] else [] end
+            )
+          + (
+              if $rank[$stage] >= $rank.server then [
+                {
+                  address:"module.cluster.google_compute_region_instance_group_manager.server_pool",
+                  mode:"managed",
+                  type:"google_compute_region_instance_group_manager",
+                  change:{
+                    actions:(if $stage == "server" or $stage == "server-health" then ["update"] else ["no-op"] end),
+                    before:{
+                      distribution_policy_zones:["us-east4-c"],
+                      version:[{instance_template:(if $stage == "server" then "old-template" else "new-template" end)}],
+                      update_policy:[{
+                        replacement_method:"SUBSTITUTE", max_unavailable_fixed:0,
+                        max_unavailable_percent:0, max_surge_fixed:1,
+                        max_surge_percent:0, min_ready_sec:120
+                      }],
+                      auto_healing_policies:[{
+                        health_check:("projects/" + $project + "/global/healthChecks/" + $legacy_health_name),
+                        initial_delay_sec:120
+                      }],
+                      instance_lifecycle_policy:[{
+                        default_action_on_failure:"REPAIR", force_update_on_repair:"NO",
+                        on_failed_health_check:"DO_NOTHING"
+                      }]
+                    },
+                    after:{
+                      distribution_policy_zones:["us-east4-c"],
+                      version:[{instance_template:"new-template"}],
+                      update_policy:[{
+                        replacement_method:"SUBSTITUTE", max_unavailable_fixed:0,
+                        max_unavailable_percent:0, max_surge_fixed:1,
+                        max_surge_percent:0, min_ready_sec:120
+                      }],
+                      auto_healing_policies:[{
+                        health_check:("projects/" + $project + "/global/healthChecks/" +
+                          (if $rank[$stage] >= $rank["server-health"] then $strict_health_name else $legacy_health_name end)),
+                        initial_delay_sec:120
+                      }],
+                      instance_lifecycle_policy:[{
+                        default_action_on_failure:"REPAIR", force_update_on_repair:"NO",
+                        on_failed_health_check:"DO_NOTHING"
+                      }]
+                    },
+                    after_unknown:{}
                   }
                 }
               ] else [] end
@@ -234,7 +520,6 @@ make_plan() {
                   mode:"managed",
                   type:(
                     if ($address | contains("firewall")) then "google_compute_firewall"
-                    elif ($address | contains("health_check")) then "google_compute_health_check"
                     elif ($address | contains("region_instance_group_manager")) then "google_compute_region_instance_group_manager"
                     else "google_compute_instance_group_manager" end
                   ),
@@ -242,29 +527,7 @@ make_plan() {
                     actions:(if ($address | contains("iap_remote_connection")) then ["create"] else ["update"] end),
                     before:(if ($address | contains("iap_remote_connection")) then null else {} end),
                     after:(
-                      if ($address | contains("server_nomad_check")) then {
-                        id:"projects/monad-code/global/healthChecks/e2b-orch-server-nomad-check",
-                        check_interval_sec:5, timeout_sec:5,
-                        healthy_threshold:2, unhealthy_threshold:10,
-                        http_health_check:[{port:50001,request_path:"/healthz"}]
-                      } elif ($address | contains("server_pool")) then {
-                        distribution_policy_zones:["us-east4-c"],
-                        update_policy:[{
-                          replacement_method:"SUBSTITUTE",
-                          max_unavailable_fixed:0,
-                          max_unavailable_percent:null,
-                          max_surge_fixed:1
-                        }],
-                        auto_healing_policies:[{
-                          health_check:"https://www.googleapis.com/compute/beta/projects/monad-code/global/healthChecks/e2b-orch-server-nomad-check",
-                          initial_delay_sec:120
-                        }],
-                        instance_lifecycle_policy:[{
-                          default_action_on_failure:"REPAIR",
-                          force_update_on_repair:"NO",
-                          on_failed_health_check:"DO_NOTHING"
-                        }]
-                      } elif ($address | contains("iap_remote_connection")) then {
+                      if ($address | contains("iap_remote_connection")) then {
                         direction:"INGRESS", priority:700,
                         source_ranges:["35.235.240.0/20"], target_tags:["orch"],
                         allow:[{protocol:"tcp",ports:["22","3389"]}], deny:[],
@@ -290,12 +553,102 @@ make_plan() {
   chmod 0600 "${output}"
 }
 
-for stage in network server api worker build; do
+for stage in network server-safety server server-health api worker build; do
   plan="${test_dir}/${stage}.plan"
   make_plan "${stage}" "${plan}"
   "${script_dir}/assert-network-hardening-stage-plan.sh" \
     "${plan}" "${fake_terraform}" "${stage}" >/dev/null
 done
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.terraform_data.acl_bootstrap_environment_guard")
+    | .change.after.input) = "prod"
+' "${test_dir}/server.plan" >"${test_dir}/server-nondev-environment.plan"
+expect_fail "cluster ACL migration cannot target a nondev environment" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-nondev-environment.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.server")
+    | .change.after.service_account[0].email) = "e2b-infra-instances@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/server.plan" >"${test_dir}/server-wrong-identity.plan"
+expect_fail "server stage cannot attach the worker/build identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-wrong-identity.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.server")
+    | .change.after.tags) = []
+' "${test_dir}/server.plan" >"${test_dir}/server-missing-discovery-tag.plan"
+expect_fail "server stage requires the server-only discovery tag" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-missing-discovery-tag.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.address == "module.cluster.google_compute_instance_template.loki")
+    | .change.after.service_account[0].email) = "e2b-infra-instances@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/build.plan" >"${test_dir}/data-wrong-identity.plan"
+expect_fail "data stage cannot attach the worker/build identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/data-wrong-identity.plan" "${fake_terraform}" build
+
+# An interrupted create-before-destroy setup object replacement leaves a
+# deposed ABANDON entry. The next exact stage may forget only that old state
+# beside one current no-op; the old content-addressed cloud object is retained.
+jq '
+  .resource_changes += [{
+    address:"module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]",
+    deposed:"8df55091",
+    mode:"managed",
+    type:"google_storage_bucket_object",
+    change:{
+      actions:["delete"],
+      before:{
+        bucket:"monad-code-instance-setup",
+        deletion_policy:"ABANDON",
+        name:"run-nomad-11111.sh",
+        source:"/repo/nomad-cluster/scripts/run-nomad.sh"
+      },
+      after:null
+    }
+  }]
+' "${test_dir}/api.plan" >"${test_dir}/api-deposed-abandon-cleanup.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-abandon-cleanup.plan" "${fake_terraform}" api >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.deposed == "8df55091")
+    | .change.before.deletion_policy) = "DELETE"
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-delete-policy.plan"
+expect_fail "deposed setup cleanup must retain the cloud object with ABANDON" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-delete-policy.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(
+        .address == "module.cluster.google_storage_bucket_object.setup_config_objects[\"scripts/run-nomad.sh\"]"
+        and .deposed == null
+      )
+    | .change.actions) = ["update"]
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-current-drift.plan"
+expect_fail "deposed setup cleanup requires one unchanged current object" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-current-drift.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(.deposed == "8df55091")
+    | .change.before.bucket) = "wrong-bucket"
+' "${test_dir}/api-deposed-abandon-cleanup.plan" >"${test_dir}/api-deposed-wrong-bucket.plan"
+expect_fail "deposed setup cleanup is bound to the current object bucket" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-deposed-wrong-bucket.plan" "${fake_terraform}" api
 
 jq '
   .resource_changes |= map(
@@ -407,10 +760,10 @@ jq '
 # re-proves live convergence before creating the marker.
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.actions) = ["delete", "create"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.before) = {input:"server"}
   | (.resource_changes[]
     | select(.address == "module.cluster.google_compute_instance_template.server")
@@ -426,16 +779,16 @@ jq '
 # a missing forced completion remains recoverable under that held lease.
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.actions) = ["create"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.before) = null
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.actions) = ["no-op"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.before) = {input:"server"}
 ' "${test_dir}/server.plan" >"${test_dir}/missing-sentinel-retry.plan"
 "${script_dir}/assert-network-hardening-stage-plan.sh" \
@@ -448,10 +801,10 @@ expect_fail "same-stage retry requires validated recovery context" \
 # marker; a prior marker that would be created or changed fails closed.
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.actions) = ["create"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.before) = null
 ' "${test_dir}/api.plan" >"${test_dir}/missing-previous-marker.plan"
 expect_fail "missing previous-stage marker cannot admit the following stage" \
@@ -460,7 +813,7 @@ expect_fail "missing previous-stage marker cannot admit the following stage" \
 
 jq '
   .resource_changes |= map(
-    select(.address != "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    select(.address != "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
   )
 ' "${test_dir}/api.plan" >"${test_dir}/missing-previous-completion.plan"
 expect_fail "missing previous-stage completion cannot admit the following stage" \
@@ -524,20 +877,105 @@ expect_fail "server stage rejects unknown lifecycle repair policy" \
   "${script_dir}/assert-network-hardening-stage-plan.sh" \
   "${test_dir}/unknown-server-health-repair.plan" "${fake_terraform}" server
 
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.role) = "roles/owner"
+' "${test_dir}/server.plan" >"${test_dir}/unsafe-bootstrap-iam.plan"
+expect_fail "server stage rejects over-broad bootstrap secret IAM" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/unsafe-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.project) = "other-project"
+' "${test_dir}/server.plan" >"${test_dir}/wrong-project-bootstrap-iam.plan"
+expect_fail "server stage binds bootstrap IAM to the selected project" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/wrong-project-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.after.member) = "serviceAccount:wrong@monad-code.iam.gserviceaccount.com"
+' "${test_dir}/server.plan" >"${test_dir}/wrong-member-bootstrap-iam.plan"
+expect_fail "server stage binds bootstrap IAM to the exact attached identity" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/wrong-member-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  .resource_changes |= map(
+    select(.address != "module.cluster.google_secret_manager_secret_iam_member.bootstrap_server[\"nomad_management\"]")
+  )
+' "${test_dir}/server.plan" >"${test_dir}/missing-bootstrap-iam.plan"
+expect_fail "server stage requires the exact eight-resource server IAM set" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/missing-bootstrap-iam.plan" "${fake_terraform}" server
+
+jq '
+  .resource_changes += [{
+    address:"module.cluster.google_secret_manager_secret_iam_member.bootstrap_api[\"nomad_management\"]",
+    mode:"managed",
+    type:"google_secret_manager_secret_iam_member",
+    change:{
+      actions:["create"],
+      before:null,
+      after:{
+        project:"monad-code",
+        secret_id:"projects/monad-code/secrets/e2b-nomad-secret-id",
+        role:"roles/secretmanager.secretAccessor",
+        member:"serviceAccount:e2b-api-controller@monad-code.iam.gserviceaccount.com"
+      }
+    }
+  }]
+' "${test_dir}/api.plan" >"${test_dir}/api-nomad-bootstrap-iam.plan"
+expect_fail "API stage cannot grant the Nomad management secret" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/api-nomad-bootstrap-iam.plan" "${fake_terraform}" api
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.actions) = ["update"]
+' "${test_dir}/worker.plan" >"${test_dir}/worker-bootstrap-iam.plan"
+expect_fail "worker stage cannot mutate bootstrap secret IAM" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/worker-bootstrap-iam.plan" "${fake_terraform}" worker
+
+jq '
+  .resource_changes |= map(
+    if .type == "google_secret_manager_secret_iam_member" then
+      .change.actions = ["no-op"] | .change.before = .change.after
+    else . end
+  )
+' "${test_dir}/server.plan" >"${test_dir}/server-bootstrap-iam-noop.plan"
+"${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/server-bootstrap-iam-noop.plan" "${fake_terraform}" server >/dev/null
+
+jq '
+  (.resource_changes[]
+    | select(.type == "google_secret_manager_secret_iam_member")
+    | .change.actions) = ["delete"]
+' "${test_dir}/server.plan" >"${test_dir}/deleting-bootstrap-iam.plan"
+expect_fail "server recovery rejects destructive bootstrap IAM shapes" \
+  "${script_dir}/assert-network-hardening-stage-plan.sh" \
+  "${test_dir}/deleting-bootstrap-iam.plan" "${fake_terraform}" server
+
 # After a successful stage, only a recovery-token retry may keep the current
 # marker as a no-op while replacing the completion sentinel.
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.actions) = ["delete", "create"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.before) = {input:"server"}
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.actions) = ["no-op"]
   | (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.before) = {input:"server"}
   | (.resource_changes[]
     | select(.address == "module.cluster.google_compute_instance_template.server")
@@ -567,7 +1005,7 @@ expect_fail "planned refresh cannot borrow a recovery context" \
 
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_stage_server_template[0]")
     | .change.actions) = ["update"]
 ' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/post-apply-marker-update.plan"
 expect_fail "same-stage retry cannot mutate the persisted marker" \
@@ -576,7 +1014,7 @@ expect_fail "same-stage retry cannot mutate the persisted marker" \
 
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.before.input) = "network"
 ' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/mismatched-current-marker.plan"
 expect_fail "current marker requires its exact completion replacement" \
@@ -585,7 +1023,7 @@ expect_fail "current marker requires its exact completion replacement" \
 
 jq '
   (.resource_changes[]
-    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server[0]")
+    | select(.address == "module.cluster.terraform_data.network_hardening_rollout_completion_server_template[0]")
     | .change.actions) = ["no-op"]
 ' "${test_dir}/post-apply-drift-retry.plan" >"${test_dir}/marker-retry-without-convergence.plan"
 expect_fail "marker retry without forced convergence replacement" \
