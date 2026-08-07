@@ -222,6 +222,96 @@ eval "$(declare -f snapshot_gce_agent_runtime_real | sed \
   '1s/snapshot_gce_agent_runtime_real/snapshot_gce_agent_runtime/')"
 unset -f snapshot_gce_agent_runtime_real
 
+# A transient login outage can fail-close and runtime-mask Consul after the old
+# token enters its safety window. With no rollback journal left, the next timer
+# must reconstruct only the validated per-boot recovery config, unmask/start a
+# bounded local listener, login, and atomically reload the returned generation.
+# It must not leave the recovery-only config or the service mask behind.
+write_generation "$OLD_TOKEN" "$OLD_ACCESSOR" 3600
+jq --argjson expiration "$(( $(date -u +%s) - 1 ))" \
+  '.expiration_epoch=$expiration' "$GCE_AGENT_RUNTIME_LEASE" \
+  >"$test_root/expired-lease"
+mv "$test_root/expired-lease" "$GCE_AGENT_RUNTIME_LEASE"
+rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL" "$GCE_AGENT_PENDING_REVOKE_DIR"
+recovery_calls="$test_root/recovery.calls"
+recovery_login_seen="$test_root/recovery-login.seen"
+: >"$recovery_calls"
+consul_active=true
+consul_masked=false
+systemctl() {
+  printf '%s\n' "$*" >>"$recovery_calls"
+  case "$*" in
+    'mask --runtime consul.service') consul_masked=true ;;
+    'kill --kill-who=main --signal=KILL consul.service') consul_active=false ;;
+    'stop consul.service') consul_active=false ;;
+    'unmask --runtime consul.service') consul_masked=false ;;
+    'daemon-reload') return 0 ;;
+    'start --no-block consul.service')
+      [[ "$consul_masked" == false ]]
+      gce_agent_recovery_runtime_config_is_valid
+      consul_active=true
+      ;;
+    'reload consul.service')
+      [[ "$consul_active" == true ]]
+      gce_agent_runtime_has_headroom 900
+      ;;
+    'is-active --quiet consul.service') [[ "$consul_active" == true ]] ;;
+    *) return 0 ;;
+  esac
+}
+fail_close_consul_agent
+[[ "$consul_active" == false && "$consul_masked" == true ]]
+[[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
+acquire_gce_agent_identity() {
+  [[ "$consul_active" == true && "$consul_masked" == false ]]
+  gce_agent_recovery_runtime_config_is_valid
+  printf 'recovery-login\n' >"$recovery_login_seen"
+  write_generation "$NEW_TOKEN" "$NEW_ACCESSOR" 3600
+}
+refresh_gce_agent_identity us-east4 root
+[[ -f "$recovery_login_seen" ]]
+[[ "$consul_active" == true && "$consul_masked" == false ]]
+[[ ! -e "$GCE_AGENT_ROTATION_JOURNAL" ]]
+[[ "$(tr -d '\r\n' <"$GCE_AGENT_RUNTIME_TOKEN")" == "$NEW_TOKEN" ]]
+gce_agent_runtime_has_headroom 900
+if gce_agent_recovery_runtime_config_is_valid; then
+  echo 'recovery-only config survived successful atomic activation' >&2
+  exit 1
+fi
+grep -Fqx 'mask --runtime consul.service' "$recovery_calls"
+grep -Fqx 'unmask --runtime consul.service' "$recovery_calls"
+grep -Fqx 'start --no-block consul.service' "$recovery_calls"
+grep -Fqx 'reload consul.service' "$recovery_calls"
+
+# If that recovery-only login itself is unavailable, the listener is killed,
+# masked, and its startable config is removed. A later timer may reconstruct it
+# from the same validated per-boot recovery token and complete the login.
+write_generation "$OLD_TOKEN" "$OLD_ACCESSOR" 3600
+jq --argjson expiration "$(( $(date -u +%s) - 1 ))" \
+  '.expiration_epoch=$expiration' "$GCE_AGENT_RUNTIME_LEASE" \
+  >"$test_root/expired-retry-lease"
+mv "$test_root/expired-retry-lease" "$GCE_AGENT_RUNTIME_LEASE"
+fail_close_consul_agent
+: >"$recovery_calls"
+acquire_gce_agent_identity() {
+  gce_agent_recovery_runtime_config_is_valid
+  return 1
+}
+if refresh_gce_agent_identity us-east4 root; then
+  echo 'failed recovery-only login was reported as converged' >&2
+  exit 1
+fi
+[[ "$consul_active" == false && "$consul_masked" == true ]]
+[[ ! -e "$GCE_AGENT_RUNTIME_CONFIG" ]]
+acquire_gce_agent_identity() {
+  [[ "$consul_active" == true && "$consul_masked" == false ]]
+  gce_agent_recovery_runtime_config_is_valid
+  write_generation "$NEW_TOKEN" "$NEW_ACCESSOR" 3600
+}
+refresh_gce_agent_identity us-east4 root
+[[ "$consul_active" == true && "$consul_masked" == false ]]
+gce_agent_runtime_has_headroom 900
+
 # If both candidate reload and rollback reload fail, the agent is fail-closed
 # and the root-only journal survives for the next timer/manual recovery.
 fail_close_calls="$test_root/fail-close.calls"

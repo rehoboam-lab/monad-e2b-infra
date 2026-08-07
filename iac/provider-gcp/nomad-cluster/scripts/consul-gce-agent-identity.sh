@@ -18,9 +18,68 @@ function generate_gce_agent_recovery_token {
   printf '%s\n' "$token"
 }
 
-function initialize_gce_agent_runtime_config {
+function gce_agent_file_mode_is {
+  local -r path="$1"
+  local -r expected_mode="$2"
+  local actual_mode
+
+  actual_mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")" \
+    || return 1
+  [[ "$actual_mode" == "$expected_mode" ]]
+}
+
+function gce_agent_recovery_runtime_config_is_valid {
+  local -r config_file="${1:-$GCE_AGENT_RUNTIME_CONFIG}"
+
+  [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
+  [[ -f "$GCE_AGENT_RECOVERY_TOKEN" && ! -L "$GCE_AGENT_RECOVERY_TOKEN" ]] \
+    || return 1
+  gce_agent_file_mode_is "$config_file" 640 || return 1
+  gce_agent_file_mode_is "$GCE_AGENT_RECOVERY_TOKEN" 640 || return 1
+  jq -e --rawfile recovery "$GCE_AGENT_RECOVERY_TOKEN" '
+    ($recovery | gsub("[\\r\\n]+$"; "")) as $secret
+    | ($secret | test("^[0-9A-Fa-f-]{36}$"))
+      and (type == "object")
+      and (keys == ["acl"])
+      and ((.acl | type) == "object")
+      and ((.acl | keys) == ["tokens"])
+      and ((.acl.tokens | type) == "object")
+      and ((.acl.tokens | keys) == ["agent_recovery"])
+      and .acl.tokens.agent_recovery == $secret
+  ' "$config_file" >/dev/null
+}
+
+function write_gce_agent_recovery_runtime_config {
   local -r consul_user="$1"
   local runtime_tmp
+
+  [[ -d "$GCE_AGENT_RUNTIME_DIR" && ! -L "$GCE_AGENT_RUNTIME_DIR" ]] \
+    || return 1
+  [[ -f "$GCE_AGENT_RECOVERY_TOKEN" && ! -L "$GCE_AGENT_RECOVERY_TOKEN" ]] \
+    || return 1
+  runtime_tmp="$(mktemp "$GCE_AGENT_RUNTIME_DIR/agent-recovery.XXXXXX")" \
+    || return 1
+  if ! jq -n --rawfile recovery "$GCE_AGENT_RECOVERY_TOKEN" '
+    ($recovery | gsub("[\\r\\n]+$"; "")) as $secret
+    | if ($secret | test("^[0-9A-Fa-f-]{36}$")) then
+        {acl:{tokens:{agent_recovery:$secret}}}
+      else error("invalid Consul agent recovery token") end
+  ' >"$runtime_tmp" \
+    || ! chmod 0640 "$runtime_tmp" \
+    || ! chown "root:$consul_user" "$runtime_tmp" \
+    || ! gce_agent_recovery_runtime_config_is_valid "$runtime_tmp"; then
+    rm -f -- "$runtime_tmp"
+    return 1
+  fi
+  if ! mv -f -- "$runtime_tmp" "$GCE_AGENT_RUNTIME_CONFIG"; then
+    rm -f -- "$runtime_tmp"
+    return 1
+  fi
+  gce_agent_recovery_runtime_config_is_valid
+}
+
+function initialize_gce_agent_runtime_config {
+  local -r consul_user="$1"
   local recovery_tmp
 
   install -d -o root -g "$consul_user" -m 0750 "$GCE_AGENT_RUNTIME_DIR"
@@ -29,16 +88,7 @@ function initialize_gce_agent_runtime_config {
   chmod 0640 "$recovery_tmp"
   chown "root:$consul_user" "$recovery_tmp"
   mv -f -- "$recovery_tmp" "$GCE_AGENT_RECOVERY_TOKEN"
-  runtime_tmp="$(mktemp "$GCE_AGENT_RUNTIME_DIR/agent-token.XXXXXX")"
-  jq -n --rawfile recovery "$GCE_AGENT_RECOVERY_TOKEN" '
-    ($recovery | gsub("[\\r\\n]+$"; "")) as $secret
-    | if ($secret | test("^[0-9A-Fa-f-]{36}$")) then
-        {acl:{tokens:{agent_recovery:$secret}}}
-      else error("invalid Consul agent recovery token") end
-  ' >"$runtime_tmp"
-  chmod 0640 "$runtime_tmp"
-  chown "root:$consul_user" "$runtime_tmp"
-  mv -f -- "$runtime_tmp" "$GCE_AGENT_RUNTIME_CONFIG"
+  write_gce_agent_recovery_runtime_config "$consul_user"
   rm -f -- "$GCE_AGENT_RUNTIME_TOKEN" "$GCE_AGENT_RUNTIME_LEASE" "$GCE_AGENT_BOOT_READY"
 }
 
@@ -239,6 +289,7 @@ function snapshot_gce_agent_runtime {
 function restore_gce_agent_runtime {
   local -r source="$1"
   local -r consul_user="$2"
+  local -r minimum_seconds="${3:-0}"
   local token_tmp
   local recovery_tmp
   local lease_tmp
@@ -249,7 +300,7 @@ function restore_gce_agent_runtime {
   done
   gce_agent_generation_is_valid \
     "$source/agent-token.json" "$source/agent-token" \
-    "$source/agent-recovery-token" "$source/lease.json" 0
+    "$source/agent-recovery-token" "$source/lease.json" "$minimum_seconds"
   token_tmp="$(mktemp "$GCE_AGENT_RUNTIME_DIR/agent-token.raw.XXXXXX")"
   recovery_tmp="$(mktemp "$GCE_AGENT_RUNTIME_DIR/agent-recovery-token.XXXXXX")"
   lease_tmp="$(mktemp "$GCE_AGENT_RUNTIME_DIR/lease.XXXXXX")"
@@ -268,7 +319,9 @@ function restore_gce_agent_runtime {
   mv -f -- "$recovery_tmp" "$GCE_AGENT_RECOVERY_TOKEN"
   mv -f -- "$lease_tmp" "$GCE_AGENT_RUNTIME_LEASE"
   mv -f -- "$config_tmp" "$GCE_AGENT_RUNTIME_CONFIG"
-  gce_agent_runtime_has_headroom 0
+  gce_agent_generation_is_valid \
+    "$GCE_AGENT_RUNTIME_CONFIG" "$GCE_AGENT_RUNTIME_TOKEN" \
+    "$GCE_AGENT_RECOVERY_TOKEN" "$GCE_AGENT_RUNTIME_LEASE" "$minimum_seconds"
 }
 
 function decode_jwt_segment {
@@ -692,6 +745,48 @@ function fail_close_consul_agent {
   systemctl stop consul.service >/dev/null 2>&1 || true
 }
 
+function fail_close_gce_agent_recovery_mode {
+  local status=0
+
+  fail_close_consul_agent || status=1
+  # The per-boot recovery token remains root/Consul-readable so a later timer
+  # can reconstruct this exact bounded configuration. The recovery-only config
+  # itself is never left as a startable service generation after a failed login.
+  rm -f -- "$GCE_AGENT_RUNTIME_CONFIG" || status=1
+  systemctl mask --runtime consul.service >/dev/null 2>&1 || status=1
+  return "$status"
+}
+
+function start_gce_agent_recovery_mode {
+  local -r consul_user="$1"
+  local active=false
+
+  if systemctl is-active --quiet consul.service; then
+    gce_agent_recovery_runtime_config_is_valid \
+      && systemctl unmask --runtime consul.service
+    return
+  fi
+  if ! write_gce_agent_recovery_runtime_config "$consul_user" \
+    || ! systemctl unmask --runtime consul.service \
+    || ! systemctl daemon-reload \
+    || ! systemctl start --no-block consul.service; then
+    fail_close_gce_agent_recovery_mode || true
+    return 1
+  fi
+  for _ in {1..30}; do
+    if systemctl is-active --quiet consul.service; then
+      active=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$active" != true ]] \
+    || ! gce_agent_recovery_runtime_config_is_valid; then
+    fail_close_gce_agent_recovery_mode || true
+    return 1
+  fi
+}
+
 function prepare_gce_agent_rotation_journal {
   (
   local journal_tmp
@@ -955,6 +1050,8 @@ function refresh_gce_agent_identity {
   local -r datacenter="$1"
   local -r consul_user="$2"
   local journal_created=false
+  local recovery_mode=false
+  local recovery_closed=false
   local was_active=false
   local old_accessor=""
   local new_accessor=""
@@ -967,16 +1064,37 @@ function refresh_gce_agent_identity {
     return 1
   }
 
-  if [[ -e "$GCE_AGENT_ROTATION_JOURNAL" ]]; then
+  # A killed refresh may leave the service running only the exact recovery
+  # config and a prepared old-generation journal. Resume the login exchange in
+  # that state instead of restoring an expiring agent token just to create the
+  # loopback listener. Any other journal shape follows the normal reconciler.
+  if [[ -e "$GCE_AGENT_ROTATION_JOURNAL" ]] \
+    && gce_agent_recovery_runtime_config_is_valid \
+    && validate_gce_agent_rotation_journal \
+    && cmp -s "$GCE_AGENT_RECOVERY_TOKEN" \
+      "$GCE_AGENT_ROTATION_JOURNAL/agent-recovery-token" \
+    && jq -e '.state == "prepared"' \
+      "$GCE_AGENT_ROTATION_JOURNAL/transaction.json" >/dev/null \
+    && [[ ! -e "$GCE_AGENT_ROTATION_JOURNAL/candidate-token" ]]; then
+    journal_created=true
+    old_accessor="$(jq -er '.accessor_id' \
+      "$GCE_AGENT_ROTATION_JOURNAL/lease.json")"
+  elif [[ -e "$GCE_AGENT_ROTATION_JOURNAL" ]]; then
     reconcile_interrupted_gce_agent_rotation "$consul_user"
     [[ "$REPLY" == complete ]] && return 0
   fi
   adopt_unacknowledged_current_gce_agent_generation || return 1
   [[ "$REPLY" == adopted ]] && return 0
   if systemctl is-active --quiet consul.service; then
-    was_active=true
+    if gce_agent_recovery_runtime_config_is_valid; then
+      recovery_mode=true
+    else
+      was_active=true
+    fi
   fi
-  if gce_agent_runtime_has_headroom 0; then
+  if [[ "$journal_created" == true ]]; then
+    :
+  elif gce_agent_runtime_has_headroom 0; then
     if ! prepare_gce_agent_rotation_journal; then
       log_error "Refusing Consul agent rotation without a complete validated rollback journal"
       return 1
@@ -991,12 +1109,33 @@ function refresh_gce_agent_identity {
     return 1
   fi
 
+  if [[ "$was_active" != true && "$recovery_mode" != true ]]; then
+    if ! start_gce_agent_recovery_mode "$consul_user"; then
+      log_error "Unable to start the validated recovery-only Consul listener for GCE agent login"
+      return 1
+    fi
+    recovery_mode=true
+  fi
+
   if ! acquire_gce_agent_identity \
     "$datacenter" "$consul_user"; then
     # Never let a node continue silently after its last proven token approaches
     # expiry. The timer keeps retrying; a later successful login starts Consul
     # again from the atomically replaced runtime config.
-    if [[ "$journal_created" == true ]] \
+    if [[ "$recovery_mode" == true ]]; then
+      if fail_close_gce_agent_recovery_mode; then
+        recovery_closed=true
+      fi
+      if [[ "$recovery_closed" == true && "$journal_created" == true ]] \
+        && restore_gce_agent_runtime \
+          "$GCE_AGENT_ROTATION_JOURNAL" "$consul_user" ignore; then
+        # No candidate generation was installed. Restore the old tuple only as
+        # an inactive retry baseline, then discard the transaction so an
+        # expired journal cannot block the next recovery-only login attempt.
+        rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL"
+        journal_created=false
+      fi
+    elif [[ "$journal_created" == true ]] \
       && cmp -s "$GCE_AGENT_RUNTIME_TOKEN" \
         "$GCE_AGENT_ROTATION_JOURNAL/agent-token"; then
       rm -rf -- "$GCE_AGENT_ROTATION_JOURNAL"
